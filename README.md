@@ -35,9 +35,9 @@ Also here is some note i found out about esp32 wroom that for me (whose new to e
 - [PINOUT Caution](https://lastminuteengineers.com/esp32-wroom-32-pinout-reference/)
 from this web, i found that some pins cant be used as output especially 34-39 (input only)
 
-Safe  pin:
+- Safe  pin:
     32, 33, 25, 26, 27, 14, 12, 13, 4, 16, 17, 18, 19, 21, 22, 23
-ADC1:
+- ADC1:
     36, 39, 34, 35, 32, 33
 ---
 
