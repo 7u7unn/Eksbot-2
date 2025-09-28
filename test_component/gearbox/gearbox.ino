@@ -14,8 +14,7 @@ void setup() {
   Serial.begin(19200);
   
 }
-///1.77 untuk motor freak 1/19
-// 1/11 untuk motor oke
+
 
 void loop() {
   // put your main code here, to run repeatedly:
