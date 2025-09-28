@@ -32,8 +32,7 @@ Brief explanation of what the navigation stack is, its purpose, and the long-ter
 ![Workchart](figure/workchart.png)
 
 Also here is some note i found out about esp32 wroom that for me (whose new to esp32) important
-- [text](https://randomnerdtutorials.com/esp32-pinout-reference-gpios/)
-- [text](https://lastminuteengineers.com/esp32-wroom-32-pinout-reference/)
+- [PINOUT Caution](https://lastminuteengineers.com/esp32-wroom-32-pinout-reference/)
 from this web, i found that some pins cant be used as output especially 34-39
 
 ---
