@@ -29,6 +29,12 @@ The project starts from collecting encoder and IMU raw data, then gradually buil
 
 ## Overview
 Brief explanation of what the navigation stack is, its purpose, and the long-term goal of the project.
+![Workchart](figure/workchart.png)
+
+Also here is some note i found out about esp32 wroom that for me (whose new to esp32) important
+- [text](https://randomnerdtutorials.com/esp32-pinout-reference-gpios/)
+- [text](https://lastminuteengineers.com/esp32-wroom-32-pinout-reference/)
+from this web, i found that some pins cant be used as output especially 34-39
 
 ---
 
@@ -38,7 +44,8 @@ Brief explanation of what the navigation stack is, its purpose, and the long-ter
 ---
 
 ## Development Roadmap
-1. **Parameter Calibration** – Extract internal parameters from encoders  
+1. **Parameter Calibration** – Extract internal parameters from encoders 
+    - For motor and encoder, first use gearbox.ino to get gearbox ratio for each motor (one of the pair of hall sensor in encoder must be put interrupt pin for better reading)
 2. **IMU Calibration** – Collect raw IMU data and process bias/noise  
 3. **Encoder Odometry** – Implement differential drive odometry  
 4. **IMU Processed Data** – Clean and filter IMU data  

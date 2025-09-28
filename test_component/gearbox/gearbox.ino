@@ -1,10 +1,13 @@
-#define encA 2//interrupt
-#define encB 3
+#define encA1 2//interrupt
+#define encB1 3
+
+#define encA2 2//interrupt
+#define encB2 3
 int val_R = 0;
 
 int statusA, statusB = 0;
 
-void ISR_R();
+void IRAM_ATTR ISR_R();
 
 void setup() {
   // put your setup code here, to run once:
@@ -22,7 +25,7 @@ void loop() {
 
 }
 
-void ISR_R(){
+void IRAM_ATTR ISR_R(){
   if(digitalRead(encB)==LOW) val_R+=1;
   else val_R-=1;
 }
