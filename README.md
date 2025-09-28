@@ -33,18 +33,34 @@ Brief explanation of what the navigation stack is, its purpose, and the long-ter
 
 Also here is some note i found out about esp32 wroom that for me (whose new to esp32) important
 - [PINOUT Caution](https://lastminuteengineers.com/esp32-wroom-32-pinout-reference/)
-from this web, i found that some pins cant be used as output especially 34-39
+from this web, i found that some pins cant be used as output especially 34-39 (input only)
 
+Safe  pin:
+    32, 33, 25, 26, 27, 14, 12, 13, 4, 16, 17, 18, 19, 21, 22, 23
+ADC1:
+    36, 39, 34, 35, 32, 33
 ---
 
-## System Architecture
-(Insert diagram here – e.g., the block diagram showing motor control, odometry, calibration, extras, etc.)
+### Pin Usage
+1. **Motor Driver** 
+ENA, ENB, IN1, IN2, IN3, IN4 = 22, 23, 21, 19, 17, 18
 
----
+2. **MUX**
+S0,S1,S2,S3,SIG = 25, 33, 32, 26, 34
+
+3. **IMU**
+SCL, SDA = 12,13
+
+4. **Encoder**
+A1, B1, A2, B2 = 35, 36, 14, 16
+
+
 
 ## Development Roadmap
 1. **Parameter Calibration** – Extract internal parameters from encoders 
     - For motor and encoder, first use gearbox.ino to get gearbox ratio for each motor (one of the pair of hall sensor in encoder must be put interrupt pin for better reading)
+    - From GearRatio we can easly get ticks to cm ratio
+    - 
 2. **IMU Calibration** – Collect raw IMU data and process bias/noise  
 3. **Encoder Odometry** – Implement differential drive odometry  
 4. **IMU Processed Data** – Clean and filter IMU data  
@@ -88,31 +104,5 @@ from this web, i found that some pins cant be used as output especially 34-39
 #### Sensor Value Reading
 - Sensor integration for navigation or obstacle avoidance.  
 - Data visualization methods.
-
----
-
-## Installation
-Steps for cloning the repo, installing dependencies, and preparing the development environment.
-
----
-
-## Usage
-Examples of running each module step-by-step (e.g., how to test encoder odometry, IMU calibration, etc.).
-
----
-
-## Hardware Setup
-- Differential drive robot hardware specs (motors, encoders, IMU, controller board, sensors, etc.).  
-- Wiring diagram and setup instructions.
-
----
-
-## Contributing
-Guidelines for contributing, reporting issues, or suggesting improvements.
-
----
-
-## License
-Specify your license (e.g., MIT, Apache 2.0, GPL).
 
 
