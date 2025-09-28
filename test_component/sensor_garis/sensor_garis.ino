@@ -12,7 +12,7 @@ int s2 = 32;
 int s3 = 35;
 
 //Mux in "SIG" pin
-int SIG_pin = 34;
+int SIG_pin = 34; //gagal karna 34 input only!!
 
 
 void setup() {

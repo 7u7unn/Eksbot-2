@@ -5,7 +5,7 @@ The project starts from collecting encoder and IMU raw data, then gradually buil
 
 
 
-## Workchart : Steps of dev
+## Dev Flow Breakdown : 
 
 <img src="figure/workchart.png" width="600">
 
@@ -14,7 +14,7 @@ The project starts from collecting encoder and IMU raw data, then gradually buil
 ## Development Roadmap
 1. **Parameter Calibration** – Extract internal parameters from encoders 
     - For motor and encoder, first use gearbox.ino to get gearbox ratio for each motor (one of the pair of hall sensor in encoder must be put interrupt pin for better reading)
-    - From GearRatio we can easly get ticks to cm ratio
+    - From GearRatio we can easly get ticks-to-cm ratio
     - 
 2. **IMU Calibration** – Collect raw IMU data and process bias/noise  
 3. **Encoder Odometry** – Implement differential drive odometry  
