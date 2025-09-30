@@ -16,7 +16,7 @@ float gb = 0;
 
 void IRAM_ATTR Read_R();
 void IRAM_ATTR Read_L();
-void Calc_gearbox(int RL);
+float Calc_gearbox(int RL);
 
 bool start = false;
 int opt;
@@ -41,7 +41,7 @@ void loop() {
     while (1) {
       if (Serial.available()>0) {
 
-        int opt = Serial.parseInt();
+        opt = Serial.parseInt();
         break;
       }
     }

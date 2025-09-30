@@ -15,9 +15,9 @@ The project starts from collecting encoder and IMU raw data, then gradually buil
 1. **Parameter Calibration** – Extract internal parameters from encoders 
     - For motor and encoder, first use gearbox.ino to get gearbox ratio for each motor (one of the pair of hall sensor in encoder must be put interrupt pin for better reading)
     - From GearRatio we can easly get ticks-to-cm ratio
-    - 
 2. **IMU Calibration** – Collect raw IMU data and process bias/noise  
 3. **Encoder Odometry** – Implement differential drive odometry  
+    - add gearbox ratio to this part
 4. **IMU Processed Data** – Clean and filter IMU data  
 5. **Encoder + IMU Fusion** – Fuse encoder odometry and IMU for better localization  
 6. **Calibration Module** – Fine-tune and test odometry results  
@@ -35,6 +35,9 @@ from this web, i found that some pins cant be used as output especially 34-39 (i
     **4, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33**
 - ADC1:
     **32, 33, 34, 35, 36, 39**
+
+- Sisa:
+    4, 27, 39
 
 ### Pin Usage
 1. **IMU**
