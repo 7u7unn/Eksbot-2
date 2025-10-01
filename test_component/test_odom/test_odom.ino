@@ -1,3 +1,20 @@
+#include <Wire.h>
+#include <MPU6050.h>
+
+MPU6050 mpu;
+
+// Variables for calibration and filtering
+const int filter_window_size = 10;
+const int calibration_samples = 1500;
+int filter_index = 0;
+bool filter_full = false;
+unsigned long last_time;
+float theta_imu = 90.0;
+// float theta = 90.0;
+
+// float accelZ_calibration = 0, accelZ_avg = 0, accelZ_values[filter_window_size];
+float gyroZ_calibration = 0, gyroZ_avg = 0, gyroZ_values[filter_window_size];
+
 #define encA1 35  //interrupt
 #define encB1 36
 #define encA2 14  //interrupt
@@ -13,13 +30,13 @@ float ppr = 11.0;
 float gearbox_R = 45.0;
 float gearbox_L = 45.0;
 float L = 26.9;
-float diameter = 6.5;
+float diameter = 6.7;
 float wheel_k = (PI * diameter);  // cm
 
 // Position variables
 float x = 0.0;    // cm
 float y = 0.0;    // cm
-float theta = 0;  // rad
+float theta = PI/2;  // rad
 
 // Ratio tics_to_cm (ttc)
 float ttc_R = wheel_k / (gearbox_R * ppr);
@@ -34,6 +51,8 @@ TaskHandle_t taskSerialHandle = NULL;
 void IRAM_ATTR Read_R();
 void IRAM_ATTR Read_L();
 void update_odom();
+void update_imu();
+void calib_imu();
 void taskOdometry(void *parameter);
 void taskSerialPrint(void *parameter);
 
@@ -47,6 +66,7 @@ void setup() {
   attachInterrupt(encA2, Read_L, RISING);
 
   Serial.begin(115200);
+  calib_imu();
 
   // Create mutex
   odomMutex = xSemaphoreCreateMutex();
@@ -68,7 +88,7 @@ void setup() {
     4096,              // Stack size
     NULL,              // Parameters
     0,                 // Priority (lower)
-    &taskSerialHandle  // Task handle
+    &taskSerialHandle,  // Task handle
     0);
 }
 
@@ -83,6 +103,75 @@ void IRAM_ATTR Read_R() {
 void IRAM_ATTR Read_L() {
   if (digitalRead(encB2) == LOW) val_L += 1;
   else val_L -= 1;
+}
+
+
+void calib_imu() {
+  Wire.begin(21,22,10000);
+  mpu.initialize();
+  mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);//bisa ganti ke 500, 1000, 2000
+    // mpu.setSleepEnabled(false);
+
+  while (1){
+
+  if (mpu.testConnection()) {
+    Serial.println("MPU6050 connection successful");
+    break;
+  } else {
+    Serial.println("MPU6050 connection failed");
+    
+  }
+  }
+      
+
+  Serial.println("Calibrating gyro Z...");
+  for (int i = 0; i < calibration_samples; i++) {
+    gyroZ_calibration += mpu.getRotationZ();
+    delay(3);
+  }
+  gyroZ_calibration /= calibration_samples;
+  Serial.println("Calibration complete");
+  Serial.println(gyroZ_calibration);
+
+  for (int i = 0; i < filter_window_size; i++) {
+    gyroZ_values[i] = 0;
+  }
+
+  last_time = millis();
+}
+
+// Ambil nilai-nilai IMU
+void update_imu() {
+  unsigned long current_time = millis();
+  float dt = (current_time - last_time) / 1000.0;
+  last_time = current_time;
+
+  int16_t gyroZ_raw = mpu.getRotationZ();
+  float gyroZ = (gyroZ_raw - gyroZ_calibration) / 131.0;  //
+
+  gyroZ_values[filter_index] = gyroZ;
+  filter_index = (filter_index + 1) % filter_window_size;
+
+  if (filter_index == 0) {
+    filter_full = true;
+  }
+  gyroZ_avg=0;
+  int count = filter_full ? filter_window_size : filter_index;
+  for (int i = 0; i < count; i++) {
+    gyroZ_avg += gyroZ_values[i];
+  }
+  gyroZ_avg /= count;
+
+  theta_imu -= gyroZ_avg * dt;
+  if(theta_imu < 0) theta_imu += 360;
+  if(theta_imu>=360) theta_imu-=360;
+  float theta_imu_rad = theta_imu*(PI/180);
+  // Serial.println(gyroZ_raw);
+  // Serial.print("Deg: ");
+  // Serial.print(theta);
+  // Serial.print(" ");
+  // Serial.print("Rad: ");
+  // Serial.println(theta_rad);
 }
 
 void update_odom() {
@@ -109,15 +198,16 @@ void update_odom() {
 
 void taskOdometry(void *parameter) {
   TickType_t xLastTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(20) //50Hz 
+  const TickType_t xFrequency = pdMS_TO_TICKS(100); //50Hz 
 
   for (;;) {
     if (xSemaphoreTake(odomMutex, portMAX_DELAY)) {
       update_odom();
+      update_imu();
       xSemaphoreGive(odomMutex);
     }
 
-    vTaskDelayUntil(&LastTime, xFrequency);
+    vTaskDelayUntil(&xLastTime, xFrequency);
   }
 }
 
@@ -137,7 +227,9 @@ void taskSerialPrint(void *parameter) {
       Serial.print(y, 2);
       Serial.print(" cm | Theta: ");
       Serial.print(theta * (180 / PI), 2);
-      Serial.print(" deg");
+      Serial.print(" deg | Theta IMU: ");
+      Serial.print(theta_imu, 2);
+      Serial.println(" deg");
       xSemaphoreGive(odomMutex);
 
 
@@ -145,3 +237,4 @@ void taskSerialPrint(void *parameter) {
       vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
   }
+}
