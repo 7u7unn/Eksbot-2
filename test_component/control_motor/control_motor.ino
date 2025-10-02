@@ -5,13 +5,10 @@
 #define IN3 13
 #define IN4 19
 
+const int start_pwm = 95;
+
 void setup() {
-  pinMode(ENA, OUTPUT);
-  pinMode(ENB, OUTPUT);
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
+init_motor();
 
   Serial.begin(115200);
 }
@@ -46,18 +43,27 @@ void setMotor(int spdKanan, int spdKiri) {
 
 void loop() {
   // contoh penggunaan
-  setMotor(200, 200);  // maju lurus
-  delay(2000);
 
-  setMotor(-200, -200); // mundur lurus
-  delay(2000);
+  for(int i =0; i<=255; i++){
+    setMotor(i,i);
+    Serial.println(i);
+    delay(40);
+  }
+  for(int i =255; i>=0; i--){
+    setMotor(-i,-i);
+    Serial.println(-i);
+    delay(40);
+  }
 
-  setMotor(200, -200); // belok kanan
   delay(2000);
+}
 
-  setMotor(-200, 200); // belok kiri
-  delay(2000);
 
-  setMotor(0, 0); // berhenti
-  delay(2000);
+void init_motor(){
+pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
 }

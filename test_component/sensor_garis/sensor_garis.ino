@@ -9,10 +9,10 @@ Home
 int s0 = 25;
 int s1 = 33;
 int s2 = 32;
-int s3 = 35;
+int s3 = 26; //26
 
 //Mux in "SIG" pin
-int SIG_pin = 34; //gagal karna 34 input only!!
+int SIG_pin = 34; //
 
 
 void setup() {
@@ -26,14 +26,14 @@ void setup() {
   digitalWrite(s2, LOW);
   digitalWrite(s3, LOW);
 
-  Serial.begin(9600);
+  Serial.begin(115200);
 }
 
 
 void loop() {
 
   //Loop through and read all 16 values
-  for (int i = 6; i < 12; i++) {
+  for (int i = 0; i < 12; i++) {
     if (i < 6) {
 
       Serial.print("s1 ");

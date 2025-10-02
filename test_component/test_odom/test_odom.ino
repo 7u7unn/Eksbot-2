@@ -192,8 +192,8 @@ void update_odom() {
   theta += dTheta;
   if (theta > PI) theta -= (2 * PI);
   if (theta < -PI) theta += (2 * PI);
-  x += dAvg * cos(theta);
-  y += dAvg * sin(theta);
+  x -= dAvg * cos(theta);
+  y -= dAvg * sin(theta);
 }
 
 void taskOdometry(void *parameter) {

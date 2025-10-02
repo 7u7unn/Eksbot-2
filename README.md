@@ -41,13 +41,14 @@ from this web, i found that some pins cant be used as output especially 34-39 (i
 
 ### Pin Usage
 1. **IMU**
-SCL, SDA = **12, 13**
+SCL, SDA = **22, 21**
 
 2. **Encoder**
 A1, B1, A2, B2 = **14, 16, 35, 36**
 
 3. **Motor Driver** 
-ENA, ENB, IN1, IN2, IN3, IN4 = **17, 18, 19, 21, 22, 23**
+ENA, ENB, IN1, IN2, IN3, IN4 = **18, 17, 23, 4, 13, 19**
+18  17     23   4       13      19                  
 
 4. **MUX**
 S0, S1, S2, S3, SIG = **25, 26, 32, 33, 34**
