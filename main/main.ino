@@ -96,15 +96,15 @@ int current_waypoint = 0;
 int total_waypoints = 4;
 
 // PID Control parameters
-float Kp = 0.5;
+float Kp = 60;
 float Ki = 0.0;
-float Kd = 0.05;
+float Kd = 6;
 float prev_error = 0.0;
 float integral = 0.0;
 unsigned long last_pid_time = 0;
 
 // Navigation parameters
-float distance_threshold = 10.0;  // cm
+float distance_threshold = 7.0;  // cm
 float base_speed = 150;           // PWM value
 float max_speed = 200;            // PWM value
 float min_speed = 110;            // PWM value
@@ -329,7 +329,13 @@ float normalize_angle(float angle) {
 }
 
 float calculate_distance(float x1, float y1, float x2, float y2) {
-  return sqrt(pow(x2 - x1, 2) + pow(y2 - y1, 2));
+  // if(x2>x1 || y2>y1){
+
+  return (sqrt(pow(x2 - x1, 2) + pow(y2 - y1, 2))); // kalo - 
+  // }
+  // else
+  //   (sqrt(pow(x2 - x1, 2) + pow(y2 - y1, 2)));
+  // }
 }
 
 // void navigate_to_waypoint() {
@@ -380,7 +386,7 @@ float calculate_distance(float x1, float y1, float x2, float y2) {
 
 void taskOdometry(void *parameter) {
   TickType_t xLastTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(20);  //50Hz
+  const TickType_t xFrequency = pdMS_TO_TICKS(10);  //50Hz
 
   for (;;) {
     if (xSemaphoreTake(odomMutex, portMAX_DELAY)) {
@@ -396,7 +402,7 @@ void taskOdometry(void *parameter) {
 
 void taskNavigation(void *parameter) {
   TickType_t xLastTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(50);  // 20Hz
+  const TickType_t xFrequency = pdMS_TO_TICKS(30);  // 20Hz
 
   for (;;) {
     // Read odometry data
@@ -457,7 +463,7 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
         case ROTATING:
             // Only rotate on first move to new waypoint
             if (abs(angular_error) > angle_threshold) {
-                float rotation_correction = constrain(Kp * angular_error * 650, -rotation_speed, rotation_speed);
+                float rotation_correction = constrain(angular_error * 320, -rotation_speed, rotation_speed);
                 setMotor(rotation_correction, -rotation_correction);
                 integral = 0;
                 prev_error = angular_error;
@@ -471,7 +477,7 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
             break;
         
         case MOVING:
-            // Dynamic angle correction while moving (no switching back to ROTATING)
+            // Dynamic angle correction while moving
             integral += angular_error * dt;
             float derivative = (angular_error - prev_error) / dt;
             float angular_correction = Kp * angular_error + Ki * integral + Kd * derivative;
