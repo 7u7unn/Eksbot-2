@@ -1,3 +1,13 @@
+#define ENA 18
+#define ENB 17
+#define IN1 23
+#define IN2 4
+#define IN3 13
+#define IN4 19
+void init_motor();
+volatile int current_pwm_right = 0;
+volatile int current_pwm_left = 0;
+
 #include <Wire.h>
 #include <MPU6050.h>
 
@@ -5,18 +15,18 @@ MPU6050 mpu;
 
 // Variables for calibration and filtering
 const int filter_window_size = 10;
-const int calibration_samples = 500;
+const int calibration_samples = 700;
 int filter_index = 0;
 bool filter_full = false;
 unsigned long last_time;
-float theta_imu = 90.0;
+float theta_imu = PI / 2;
+float theta_fuse = PI / 2;
 
-// float accelZ_calibration = 0, accelZ_avg = 0, accelZ_values[filter_window_size];
 float gyroZ_calibration = 0, gyroZ_avg = 0, gyroZ_values[filter_window_size];
 
-#define encA1 35  //interrupt
+#define encA1 35
 #define encB1 36
-#define encA2 14  //interrupt
+#define encA2 14
 #define encB2 16
 
 volatile long val_R = 0;
@@ -30,67 +40,37 @@ float gearbox_R = 45.0;
 float gearbox_L = 45.0;
 float L = 26.9;
 float diameter = 6.7;
-float wheel_k = (PI * diameter);  // cm
+float wheel_k = (PI * diameter);
 
 // Position variables
-float x = 0.0;    // cm
-float y = 0.0;    // cm
-float theta = PI/2;  // rad
+float x = 0.0;
+float y = 0.0;
+float theta = PI / 2;
+
+float percent_imu = 1.0;
 
 // Ratio tics_to_cm (ttc)
 float ttc_R = wheel_k / (gearbox_R * ppr);
 float ttc_L = wheel_k / (gearbox_L * ppr);
 
-// Motor control pins
-#define ENA 18
-#define ENB 17
-#define IN1 23
-#define IN2 4
-#define IN3 13
-#define IN4 19
-
-// Motor speed constraints
-const int min_speed = 95;
-const int max_speed = 255;
-int current_pwm_right = 0;
-int current_pwm_left = 0;
-
-// Navigation variables
-struct TargetPoint {
-  float x;
-  float y;
-  float theta;
-  bool active;
-};
-
-volatile TargetPoint target = {0, 0, 0, false};
-
-// Navigation parameters
-const float dist_tolerance = 1.0;      // cm
-const float angular_tolerance = 1.0;   // degrees
-const float max_linear_speed = 15.0;   // cm/s
-const float max_angular_speed = 30.0;  // deg/s
-const float linear_accel = 5.0;        // cm/s^2
-const float angular_accel = 60.0;      // deg/s^2
-const float kp_linear = 2.0;           // Proportional gain for linear movement
-const float kp_angular = 3.0;          // Proportional gain for angular movement
-const float max_steer_angle = 10.0;    // Maximum steering angle in degrees
-
-// Navigation state machine
-enum NavigationState {
-  IDLE,
-  TURN_TO_TARGET_ANGLE,
-  MOVE_TO_POINT,
-  TURN_TO_FINAL_ANGLE,
-  COMPLETE
-};
-
-volatile NavigationState nav_state = IDLE;
-
 SemaphoreHandle_t odomMutex;
+SemaphoreHandle_t navMutex;
+
 TaskHandle_t taskOdomHandle = NULL;
 TaskHandle_t taskSerialHandle = NULL;
-TaskHandle_t taskNavigationHandle = NULL;
+TaskHandle_t taskNavHandle = NULL;
+
+enum NavigationState {
+  ROTATING,
+  MOVING,
+  TURN_TO_FINAL_ANGLE,
+  IDLE,
+  ANJAY
+};
+
+NavigationState nav_state = ROTATING;
+float angle_threshold = 0.5;  // 0.5 degrees
+float rotation_speed = 150;
 
 // Function declarations
 void IRAM_ATTR Read_R();
@@ -101,12 +81,68 @@ void calib_imu();
 void taskOdometry(void *parameter);
 void taskSerialPrint(void *parameter);
 void taskNavigation(void *parameter);
-void init_motor();
-void setMotor(int spdKanan, int spdKiri);
-void setTarget(float target_x, float target_y, float target_theta);
-bool checkTargetReached();
-float normalizeAngle(float angle);
-void stop();
+
+struct Waypoint {
+  float x;
+  float y;
+  float theta_target;
+};
+
+#define MAX_WAYPOINTS 5
+Waypoint waypoints[MAX_WAYPOINTS] = {
+  { -60.0, 120.0, 90.0 },
+  { -60.0, 180.0, 90.0 },
+  {-30, 0, 270}
+};
+int current_waypoint = 0;
+int total_waypoints = 3;
+
+// ============================
+// DUAL PID CONTROL PARAMETERS
+// ============================
+
+// PID for ROTATION (angular control)
+float Kp_rot = 3.0;
+float Ki_rot = 0.4;
+float Kd_rot = 0.6;
+float integral_rot = 0.0;
+float prev_error_rot = 0.0;
+
+// PID for LINEAR SPEED (distance-based speed control)
+float Kp_linear = 5.5;   // Proportional gain untuk kecepatan linear
+float Ki_linear = 0.04;  // Integral gain untuk kecepatan linear
+float Kd_linear = 0.1;   // Derivative gain untuk kecepatan linear
+float integral_linear = 0.0;
+float prev_error_linear = 0.0;
+
+// PID for ANGULAR CORRECTION while moving
+float Kp_angular = 2.0;
+float Ki_angular = 0.01;
+float Kd_angular = 0.1;
+float integral_angular = 0.0;
+float prev_error_angular = 0.0;
+
+unsigned long last_pid_time = 0;
+
+// Speed constraints
+float distance_threshold = 1.0;  // cm
+float max_speed = 220;
+float min_speed = 75;
+
+// Anti-windup limits
+float integral_max = 50.0;
+float integral_min = -50.0;
+
+// Deadzone compensation
+int deadzone_threshold = 80;
+
+// Target distance for linear PID (setpoint)
+float target_distance_setpoint = 20.0;  // Robot akan maintain kecepatan maksimal hingga 20cm
+
+// Add function declarations
+void navigate_to_waypoint_threaded(float current_x, float current_y, float current_theta);
+float normalize_angle(float angle);
+float calculate_distance(float x1, float y1, float x2, float y2);
 
 void setup() {
   pinMode(encA1, INPUT);
@@ -120,49 +156,45 @@ void setup() {
   Serial.begin(115200);
   calib_imu();
   init_motor();
+  last_pid_time = millis();
 
   // Create mutex
   odomMutex = xSemaphoreCreateMutex();
-  
+  navMutex = xSemaphoreCreateMutex();
+
   xTaskCreatePinnedToCore(
-    taskOdometry,     // Task function
-    "OdometryTask",   // Name
-    4096,             // Stack size
-    NULL,             // Parameters
-    2,                // Priority (higher)
-    &taskOdomHandle,  // Task handle
-    1                 // Core 1
-  );
+    taskOdometry,
+    "OdometryTask",
+    4096,
+    NULL,
+    2,
+    &taskOdomHandle,
+    1);
 
-  // Task for navigation
   xTaskCreatePinnedToCore(
-    taskNavigation,    // Task function
-    "NavigationTask",  // Name
-    4096,              // Stack size
-    NULL,              // Parameters
-    1,                 // Priority (medium)
-    &taskNavigationHandle,  // Task handle
-    1                  // Core 1
-  );
+    taskNavigation,
+    "NavigationTask",
+    4096,
+    NULL,
+    2,
+    &taskNavHandle,
+    1);
 
-  // Task for serial printing (lower priority)
   xTaskCreatePinnedToCore(
-    taskSerialPrint,   // Task function
-    "SerialTask",      // Name
-    4096,              // Stack size
-    NULL,              // Parameters
-    0,                 // Priority (lower)
-    &taskSerialHandle, // Task handle
-    0                  // Core 0
-  );
-
-
-  setTarget(30.0, 30.0, 0.0);  // Move to (30cm, 30cm) with final heading 0 degrees
+    taskSerialPrint,
+    "SerialTask",
+    4096,
+    NULL,
+    0,
+    &taskSerialHandle,
+    0);
 }
 
 void loop() {
-  // Main loop can be used for other high-level commands
-  // delay(100);
+}
+
+float rad2deg(float i) {
+  return (180 / PI) * i;
 }
 
 void IRAM_ATTR Read_R() {
@@ -176,10 +208,10 @@ void IRAM_ATTR Read_L() {
 }
 
 void calib_imu() {
-  Wire.begin(21,22,10000);
+  Wire.begin(21, 22, 10000);
   mpu.initialize();
   mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);
-  
+
   while (1) {
     if (mpu.testConnection()) {
       Serial.println("MPU6050 connection successful");
@@ -188,7 +220,7 @@ void calib_imu() {
       Serial.println("MPU6050 connection failed");
     }
   }
-      
+
   Serial.println("Calibrating gyro Z...");
   for (int i = 0; i < calibration_samples; i++) {
     gyroZ_calibration += mpu.getRotationZ();
@@ -219,6 +251,7 @@ void update_imu() {
   if (filter_index == 0) {
     filter_full = true;
   }
+
   gyroZ_avg = 0;
   int count = filter_full ? filter_window_size : filter_index;
   for (int i = 0; i < count; i++) {
@@ -226,10 +259,9 @@ void update_imu() {
   }
   gyroZ_avg /= count;
 
-  theta_imu -= gyroZ_avg * dt;
-  if(theta_imu < 0) theta_imu += 360;
-  if(theta_imu >= 360) theta_imu -= 360;
-  float theta_imu_rad = theta_imu * (PI/180);
+  theta_imu -= (PI / 180) * gyroZ_avg * dt;
+  if (theta_imu > PI) theta_imu -= (2 * PI);
+  if (theta_imu < -PI) theta_imu += (2 * PI);
 }
 
 void update_odom() {
@@ -238,7 +270,7 @@ void update_odom() {
   val_R_prev = val_R;
   val_L_prev = val_L;
 
-  // Convert ticks (val) to dist
+  // Convert ticks to distance
   float dLeft = d_left_val * ttc_L;
   float dRight = d_right_val * ttc_R;
 
@@ -250,8 +282,10 @@ void update_odom() {
   theta += dTheta;
   if (theta > PI) theta -= (2 * PI);
   if (theta < -PI) theta += (2 * PI);
-  x -= dAvg * cos(theta_imu_rad);
-  y -= dAvg * sin(theta_imu_rad);
+
+  theta_fuse = (percent_imu * theta_imu) + ((1 - percent_imu) * theta);
+  x -= dAvg * cos(theta_fuse);
+  y -= dAvg * sin(theta_fuse);
 }
 
 void init_motor() {
@@ -264,18 +298,23 @@ void init_motor() {
 }
 
 void setMotor(int spdKanan, int spdKiri) {
-  if (spdKiri < 0) {
-    spdKiri = constrain(spdKiri, -max_speed, -min_speed);
-  } else if (spdKiri > 0) {
-    spdKiri = constrain(spdKiri, min_speed, max_speed);
+  // Apply constraints with deadzone compensation
+  if (spdKiri != 0) {
+    if (spdKiri > 0) {
+      spdKiri = constrain(spdKiri, min_speed, max_speed);
+    } else {
+      spdKiri = constrain(spdKiri, -max_speed, -min_speed);
+    }
   }
 
-  if (spdKanan < 0) {
-    spdKanan = constrain(spdKanan, -max_speed, -min_speed);
-  } else if (spdKanan > 0) {
-    spdKanan = constrain(spdKanan, min_speed, max_speed);
+  if (spdKanan != 0) {
+    if (spdKanan > 0) {
+      spdKanan = constrain(spdKanan, min_speed, max_speed);
+    } else {
+      spdKanan = constrain(spdKanan, -max_speed, -min_speed);
+    }
   }
-  
+
   // Store PWM values for monitoring
   current_pwm_right = spdKanan;
   current_pwm_left = spdKiri;
@@ -287,7 +326,7 @@ void setMotor(int spdKanan, int spdKiri) {
   } else if (spdKanan < 0) {
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, HIGH);
-  } else {  // berhenti
+  } else {
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, LOW);
   }
@@ -300,277 +339,337 @@ void setMotor(int spdKanan, int spdKiri) {
   } else if (spdKiri < 0) {
     digitalWrite(IN3, LOW);
     digitalWrite(IN4, HIGH);
-  } else {  // berhenti
+  } else {
     digitalWrite(IN3, LOW);
     digitalWrite(IN4, LOW);
   }
   analogWrite(ENB, constrain(abs(spdKiri), 0, 255));
 }
 
-void setTarget(float target_x, float target_y, float target_theta) {
-  if (xSemaphoreTake(odomMutex, portMAX_DELAY)) {
-    target.x = target_x;
-    target.y = target_y;
-    target.theta = target_theta;
-    target.active = true;
-    nav_state = TURN_TO_TARGET_ANGLE;
-    xSemaphoreGive(odomMutex);
-  }
-}
-
-bool checkTargetReached() {
-  float dx = target.x - x;
-  float dy = target.y - y;
-  float dist = sqrt(dx*dx + dy*dy);
-  
-  if (dist <= dist_tolerance) {
-    float angle_diff = normalizeAngle(target.theta - theta_imu);
-    if (abs(angle_diff) <= angular_tolerance) {
-      return true;
-    }
-  }
-  return false;
-}
-
-float normalizeAngle(float angle) {
-  while (angle > 180.0) angle -= 360.0;
-  while (angle <= -180.0) angle += 360.0;
+float normalize_angle(float angle) {
+  while (angle > 180) angle -= 360;
+  while (angle < -180) angle += 360;
   return angle;
 }
 
-void stop() {
-  setMotor(0, 0);
-}
-
-// Trapezoidal speed profile calculation
-float calculateSpeed(float error, float max_speed, float max_accel, float dt) {
-  // Calculate required speed based on error
-  float req_speed = min(abs(error) * kp_linear, max_speed);
-  
-  // Apply acceleration limits
-  static float last_speed = 0;
-  float max_delta_speed = max_accel * dt;
-  
-  if (req_speed > last_speed + max_delta_speed) {
-    req_speed = last_speed + max_delta_speed;
-  } else if (req_speed < last_speed - max_delta_speed) {
-    req_speed = last_speed - max_delta_speed;
-  }
-  
-  last_speed = req_speed;
-  return req_speed * (error > 0 ? 1 : -1);  // Direction based on error sign
-}
-
-void taskNavigation(void *parameter) {
-  TickType_t xLastTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(50); // 20Hz
-  unsigned long last_cmd_time = millis();
-  const unsigned long timeout = 1000; // 30 seconds timeout
-  
-  float prev_dist_error = 0;
-  float prev_angle_error = 0;
-  float last_linear_speed = 0;
-  float last_angular_speed = 0;
-  
-  for (;;) {
-    if (xSemaphoreTake(odomMutex, portMAX_DELAY)) {
-      if (target.active) {
-        float dx = target.x - x;
-        float dy = target.y - y;
-        float dist_to_target = sqrt(dx*dx + dy*dy);
-        float target_angle = atan2(dy, dx) * 180.0 / PI;
-        
-        switch (nav_state) {
-          case TURN_TO_TARGET_ANGLE:
-          {
-            float angle_error = normalizeAngle(target_angle - theta_imu);
-            
-            // Check if we've been trying too long
-            if (millis() - last_cmd_time > timeout) {
-              Serial.println("Navigation timeout - turning to target");
-              nav_state = IDLE;
-              target.active = false;
-              stop();
-              break;
-            }
-            
-            if (abs(angle_error) <= angular_tolerance) {
-              nav_state = MOVE_TO_POINT;
-              last_cmd_time = millis();
-              last_linear_speed = 0;
-              prev_dist_error = dist_to_target;
-            } else {
-              // Calculate angular speed with trapezoidal profile
-              float dt = (float)(millis() - last_cmd_time) / 1000.0;
-              last_cmd_time = millis();
-              
-              float angular_speed = calculateSpeed(angle_error, max_angular_speed, angular_accel, dt);
-              float left_speed = -angular_speed * (L/2.0) / 10.0;  // Convert to PWM units
-              float right_speed = angular_speed * (L/2.0) / 10.0;
-              
-              setMotor((int)right_speed, (int)left_speed);
-            }
-            break;
-          }
-          
-          case MOVE_TO_POINT:
-          {
-            float angle_error = normalizeAngle(target_angle - theta_imu);
-            float dist_error = dist_to_target;
-            
-            // Check timeout
-            if (millis() - last_cmd_time > timeout) {
-              Serial.println("Navigation timeout - moving to point");
-              nav_state = IDLE;
-              target.active = false;
-              stop();
-              break;
-            }
-            
-            // Check if we overshot the target (distance increasing)
-            if (dist_error > prev_dist_error + 2.0) {  // Allow some tolerance
-              Serial.println("Overshot target, stopping");
-              nav_state = IDLE;
-              target.active = false;
-              stop();
-              break;
-            }
-            
-            if (dist_error <= dist_tolerance) {
-              nav_state = TURN_TO_FINAL_ANGLE;
-              last_cmd_time = millis();
-              last_angular_speed = 0;
-            } else {
-              // Calculate linear speed with trapezoidal profile
-              float dt = (float)(millis() - last_cmd_time) / 1000.0;
-              last_cmd_time = millis();
-              
-              // Adjust heading if we're off course
-              if (abs(angle_error) > max_steer_angle) {
-                // First correct orientation
-                float angular_speed = calculateSpeed(angle_error, max_angular_speed/2.0, angular_accel/2.0, dt);
-                float left_speed = -angular_speed * (L/2.0) / 10.0;
-                float right_speed = angular_speed * (L/2.0) / 10.0;
-                
-                setMotor((int)right_speed, (int)left_speed);
-              } else {
-                // Move forward while maintaining heading
-                float linear_speed = calculateSpeed(dist_error, max_linear_speed, linear_accel, dt);
-                
-                // Apply heading correction
-                float heading_correction = angle_error * 0.5;  // Proportional correction
-                float left_speed = linear_speed - heading_correction;
-                float right_speed = linear_speed + heading_correction;
-                
-                setMotor((int)right_speed, (int)left_speed);
-              }
-            }
-            prev_dist_error = dist_error;
-            break;
-          }
-          
-          case TURN_TO_FINAL_ANGLE:
-          {
-            float angle_error = normalizeAngle(target.theta - theta_imu);
-            
-            // Check timeout
-            if (millis() - last_cmd_time > timeout) {
-              Serial.println("Navigation timeout - turning to final angle");
-              nav_state = IDLE;
-              target.active = false;
-              stop();
-              break;
-            }
-            
-            if (abs(angle_error) <= angular_tolerance) {
-              nav_state = COMPLETE;
-              stop();
-              Serial.println("Target reached!");
-            } else {
-              // Calculate angular speed with trapezoidal profile
-              float dt = (float)(millis() - last_cmd_time) / 1000.0;
-              last_cmd_time = millis();
-              
-              float angular_speed = calculateSpeed(angle_error, max_angular_speed, angular_accel, dt);
-              float left_speed = -angular_speed * (L/2.0) / 10.0;
-              float right_speed = angular_speed * (L/2.0) / 10.0;
-              
-              setMotor((int)right_speed, (int)left_speed);
-            }
-            break;
-          }
-          
-          case COMPLETE:
-            stop();
-            nav_state = IDLE;
-            target.active = false;
-            Serial.println("Navigation complete");
-            break;
-            
-          case IDLE:
-            stop();
-            break;
-        }
-      } else {
-        // No active target, stop the robot
-        if (nav_state != IDLE) {
-          stop();
-          nav_state = IDLE;
-        }
-      }
-      xSemaphoreGive(odomMutex);
-    }
-    
-    vTaskDelayUntil(&xLastTime, xFrequency);
-  }
+float calculate_distance(float x1, float y1, float x2, float y2) {
+  return sqrt(pow(x2 - x1, 2) + pow(y2 - y1, 2));
 }
 
 void taskOdometry(void *parameter) {
   TickType_t xLastTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(20); //50Hz 
+  const TickType_t xFrequency = pdMS_TO_TICKS(10);
 
   for (;;) {
     if (xSemaphoreTake(odomMutex, portMAX_DELAY)) {
-      update_odom();
       update_imu();
+      update_odom();
       xSemaphoreGive(odomMutex);
+    }
+    vTaskDelayUntil(&xLastTime, xFrequency);
+  }
+}
+
+void taskNavigation(void *parameter) {
+  TickType_t xLastTime = xTaskGetTickCount();
+  const TickType_t xFrequency = pdMS_TO_TICKS(20);  // 50Hz
+
+  for (;;) {
+    // Read odometry data
+    float local_x, local_y, local_theta;
+    if (xSemaphoreTake(odomMutex, pdMS_TO_TICKS(10))) {
+      local_x = x;
+      local_y = y;
+      local_theta = rad2deg(theta_fuse);
+      xSemaphoreGive(odomMutex);
+    } else {
+      vTaskDelayUntil(&xLastTime, xFrequency);
+      continue;
+    }
+
+    // Navigation logic
+    if (xSemaphoreTake(navMutex, portMAX_DELAY)) {
+      navigate_to_waypoint_threaded(local_x, local_y, local_theta);
+      xSemaphoreGive(navMutex);
     }
 
     vTaskDelayUntil(&xLastTime, xFrequency);
   }
 }
 
-void taskSerialPrint(void *parameter) {
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(200);  // 5Hz (200ms)
+void navigate_to_waypoint_threaded(float current_x, float current_y, float current_theta) {
+  if (current_waypoint >= total_waypoints) {
+    setMotor(0, 0);
+    nav_state = IDLE;
+    return;
+  }
+  if (current_waypoint == 2) {
+    setMotor(0, 0);
+    nav_state = ANJAY;
+    // return;
+  }
 
-  for (;;) {
-    if (xSemaphoreTake(odomMutex, portMAX_DELAY)) {
-      Serial.print("Encoder R: ");
-      Serial.print(val_R);
-      Serial.print(" | Encoder L: ");
-      Serial.print(val_L);
-      Serial.print(" | X: ");
-      Serial.print(x, 2);
-      Serial.print(" cm | Y: ");
-      Serial.print(y, 2);
-      Serial.print(" cm | Theta: ");
-      Serial.print(theta * (180 / PI), 2);
-      Serial.print(" deg | Theta IMU: ");
-      Serial.print(theta_imu, 2);
-      Serial.print(" deg | State: ");
-      Serial.print(nav_state);
-      Serial.print(" | Target: (");
-      Serial.print(target.x, 1);
-      Serial.print(",");
-      Serial.print(target.y, 1);
-      Serial.print(",");
-      Serial.print(target.theta, 1);
-      Serial.println(")");
-      xSemaphoreGive(odomMutex);
+  float target_x = waypoints[current_waypoint].x;
+  float target_y = waypoints[current_waypoint].y;
+  float target_theta = waypoints[current_waypoint].theta_target;
 
-      // Wait for next cycle
+  // Calculate distance and angle to target
+  float error_x = target_x - current_x;
+  float error_y = target_y - current_y;
+  float distance = calculate_distance(current_x, current_y, target_x, target_y);
+  float angle_to_target = rad2deg(atan2(error_y, error_x));
+  float angular_error = normalize_angle(angle_to_target - current_theta);
+
+  // Calculate dt for PID
+  unsigned long current_time = millis();
+  float dt = (current_time - last_pid_time) / 1000.0;
+  if (dt <= 0) dt = 0.02;  // Prevent division by zero
+  last_pid_time = current_time;
+
+  // State machine for navigation
+  switch (nav_state) {
+    case ROTATING:
+      {
+        // Initial rotation to face waypoint
+        if (abs(angular_error) > angle_threshold) {
+          // PID calculation for rotation
+          integral_rot += angular_error * dt;
+          integral_rot = constrain(integral_rot, integral_min, integral_max);
+
+          float derivative_rot = (angular_error - prev_error_rot) / dt;
+          prev_error_rot = angular_error;
+
+          // PID output
+          float pid_output = (Kp_rot * angular_error) + (Ki_rot * integral_rot) + (Kd_rot * derivative_rot);
+
+          // Scale to rotation speed
+          int rotation_correction = constrain((int)(pid_output),
+                                              -rotation_speed, rotation_speed);
+
+          // Deadzone compensation
+          int speed = constrain((int)rotation_correction, -rotation_speed, rotation_speed);
+          if (speed > 0 && speed < 75) speed = 75;
+          else if (speed < 0 && speed > -75) speed = -75;
+
+          setMotor(speed, -rotation_correction);
+        } else {
+          // Rotation complete, switch to MOVING
+          nav_state = MOVING;
+          integral_rot = 0;
+          integral_linear = 0;
+          integral_angular = 0;
+          prev_error_rot = 0;
+          prev_error_linear = 0;
+          prev_error_angular = 0;
+          setMotor(0, 0);
+          delay(150);
+        }
+        break;
+      }
+
+    case MOVING:
+      {
+        // Check if reached waypoint
+        if (distance < distance_threshold) {
+          nav_state = TURN_TO_FINAL_ANGLE;
+          integral_rot = 0;
+          integral_linear = 0;
+          integral_angular = 0;
+          prev_error_rot = 0;
+          prev_error_linear = 0;
+          prev_error_angular = 0;
+          setMotor(0, 0);
+          delay(150);
+          break;
+        }
+
+        // ============================
+        // PID #1: LINEAR SPEED CONTROL (Distance-based)
+        // ============================
+        float distance_error = distance;
+
+        integral_linear += distance_error * dt;
+        integral_linear = constrain(integral_linear, integral_min, integral_max);
+
+        float derivative_linear = (distance_error - prev_error_linear) / dt;
+        prev_error_linear = distance_error;
+
+        // PID output untuk kecepatan linear
+        float linear_speed = (Kp_linear * distance_error) + (Ki_linear * integral_linear) + (Kd_linear * derivative_linear);
+
+        // Constrain linear speed
+        linear_speed = constrain(linear_speed, min_speed, max_speed);
+
+        // ============================
+        // PID #2: ANGULAR CORRECTION (Angle-based)
+        // ============================
+        integral_angular += angular_error * dt;
+        integral_angular = constrain(integral_angular, integral_min, integral_max);
+
+        float derivative_angular = (angular_error - prev_error_angular) / dt;
+        prev_error_angular = angular_error;
+
+        // PID output untuk koreksi angular
+        float angular_correction = (Kp_angular * angular_error) + (Ki_angular * integral_angular) + (Kd_angular * derivative_angular);
+
+        // ============================
+        // COMBINE: Linear speed + Angular correction
+        // ============================
+        float left_speed = linear_speed - angular_correction;
+        float right_speed = linear_speed + angular_correction;
+
+        // Constrain final speeds
+        if (left_speed > 0) {
+          left_speed = constrain(left_speed, min_speed, max_speed);
+        } else if (left_speed < 0) {
+          left_speed = constrain(left_speed, -max_speed, -min_speed);
+        }
+
+        if (right_speed > 0) {
+          right_speed = constrain(right_speed, min_speed, max_speed);
+        } else if (right_speed < 0) {
+          right_speed = constrain(right_speed, -max_speed, -min_speed);
+        }
+
+        setMotor(right_speed, left_speed);
+        break;
+      }
+
+    case TURN_TO_FINAL_ANGLE:
+      {
+        float final_angle_error = normalize_angle(target_theta - current_theta);
+
+        if (abs(final_angle_error) > angle_threshold) {
+          // PID for final rotation
+          integral_rot += final_angle_error * dt;
+          integral_rot = constrain(integral_rot, integral_min, integral_max);
+
+          float derivative_rot = (final_angle_error - prev_error_rot) / dt;
+          prev_error_rot = final_angle_error;
+
+          float pid_output = (Kp_rot * final_angle_error) + (Ki_rot * integral_rot) + (Kd_rot * derivative_rot);
+
+          int rotation_correction = constrain((int)(pid_output),
+                                              -rotation_speed, rotation_speed);
+
+          // Deadzone compensation
+          if (rotation_correction > 0 && rotation_correction < 75) rotation_correction = 75;
+          else if (rotation_correction < 0 && rotation_correction > -75) rotation_correction = -75;
+
+          setMotor(rotation_correction, -rotation_correction);
+        } else {
+          // Waypoint complete
+          setMotor(0, 0);
+          current_waypoint++;
+          nav_state = ROTATING;
+          integral_rot = 0;
+          integral_linear = 0;
+          integral_angular = 0;
+          prev_error_rot = 0;
+          prev_error_linear = 0;
+          prev_error_angular = 0;
+        }
+        break;
+      }
+
+    case IDLE:
+      {
+        setMotor(0, 0);
+        break;
+      }
+
+    case ANJAY:
+      {
+        float final_angle_error = -90 - current_theta;  // Gunakan current_theta
+
+        if (abs(final_angle_error) > angle_threshold) {
+          // PID for final rotation
+          integral_rot += final_angle_error * dt;
+          integral_rot = constrain(integral_rot, integral_min, integral_max);
+
+          float derivative_rot = (final_angle_error - prev_error_rot) / dt;
+          prev_error_rot = final_angle_error;
+
+          float pid_output = (Kp_rot * final_angle_error) + (Ki_rot * integral_rot) + (Kd_rot * derivative_rot);
+
+          int rotation_correction = constrain((int)(pid_output),
+                                              -255, 255);
+
+          // Deadzone compensation
+          if (rotation_correction > 0 && rotation_correction < 100) rotation_correction = 100;
+          else if (rotation_correction < 0 && rotation_correction > -100) rotation_correction = -100;
+
+          // RODA KANAN SEBAGAI POROS (kanan = 0, kiri bergerak)
+          // Serial.println(rotation_correction);
+          setMotor(0, rotation_correction);
+
+        } else {
+          // Rotation complete
+          setMotor(0, 0);
+
+          nav_state = ROTATING;
+          // current_waypoint++;
+
+          integral_rot = 0;
+          integral_linear = 0;
+          integral_angular = 0;
+          prev_error_rot = 0;
+          prev_error_linear = 0;
+          prev_error_angular = 0;
+        }
+        break;
+      }
+  }}
+
+  void taskSerialPrint(void *parameter) {
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xFrequency = pdMS_TO_TICKS(200);
+
+    for (;;) {
+      if (xSemaphoreTake(odomMutex, pdMS_TO_TICKS(10))) {
+        Serial.print("X: ");
+        Serial.print(x, 2);
+        Serial.print(" | Y: ");
+        Serial.print(y, 2);
+        Serial.print(" | θ: ");
+        Serial.print(theta_fuse * (180 / PI), 2);
+        Serial.print("° | PWM_R: ");
+        Serial.print(current_pwm_right);
+        Serial.print(" | PWM_L: ");
+        Serial.print(current_pwm_left);
+
+        // Calculate and print current distance to target
+        if (current_waypoint < total_waypoints) {
+          float dist = calculate_distance(x, y,
+                                          waypoints[current_waypoint].x,
+                                          waypoints[current_waypoint].y);
+          Serial.print(" | Dist: ");
+          Serial.print(dist, 1);
+          Serial.print("cm");
+        }
+
+        Serial.print(" | State: ");
+
+        if (xSemaphoreTake(navMutex, pdMS_TO_TICKS(5))) {
+          switch (nav_state) {
+            case ROTATING: Serial.print("ROT"); break;
+            case MOVING: Serial.print("MOV"); break;
+            case TURN_TO_FINAL_ANGLE: Serial.print("FIN"); break;
+            case IDLE: Serial.print("IDLE"); break;
+            case ANJAY: Serial.print("ANJAY"); break;
+          }
+          Serial.print(" | WP: ");
+          Serial.print(current_waypoint);
+          Serial.print("/");
+          Serial.println(total_waypoints);
+          xSemaphoreGive(navMutex);
+        } else {
+          Serial.println("---");
+        }
+
+        xSemaphoreGive(odomMutex);
+      }
+
       vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
   }
-}
