@@ -31,7 +31,7 @@ float gyroZ_calibration = 0, gyroZ_avg = 0, gyroZ_values[filter_window_size];
 #define encB1 36
 #define encA2 14  //interrupt
 #define encB2 16
-
+float percent = 1;
 volatile long val_R = 0;
 volatile long val_L = 0;
 long val_R_prev = 0;
@@ -64,11 +64,12 @@ TaskHandle_t taskNavHandle = NULL;
 
 enum NavigationState {
   ROTATING,
-  MOVING
+  MOVING,
+  TURN_TO_FINAL_ANGLE
 };
 
 NavigationState nav_state = ROTATING;
-float angle_threshold = 5.0 * (PI / 180.0);
+float angle_threshold = 3.0 * (PI / 180.0);
 float rotation_speed = 160;
 
 // Function declarations - ADDED missing taskIMU declaration
@@ -83,30 +84,31 @@ void taskSerialPrint(void *parameter);
 struct Waypoint {
   float x;
   float y;
+  float theta_target;
 };
 
 #define MAX_WAYPOINTS 5
 Waypoint waypoints[MAX_WAYPOINTS] = {
-  { 0.0, 60.0 },  // Waypoint coordinates in cm
-  { 60.0, 60.0 },
-  { 60.0, 0.0 },
-  { 0.0, 0.0 }
+
+  { 0.0, 30.0, 0 },
+  { 30.0, 30.0, 0 },
+
 };
 int current_waypoint = 0;
-int total_waypoints = 4;
+int total_waypoints = 2;
 
 // PID Control parameters
 float Kp = 60;
-float Ki = 0.0;
+float Ki = 1.0;
 float Kd = 6;
 float prev_error = 0.0;
 float integral = 0.0;
 unsigned long last_pid_time = 0;
 
 // Navigation parameters
-float distance_threshold = 7.0;  // cm
+float distance_threshold = 3.0;  // cm
 float base_speed = 150;           // PWM value
-float max_speed = 200;            // PWM value
+float max_speed = 220;            // PWM value
 float min_speed = 110;            // PWM value
 
 // Add these function declarations
@@ -262,9 +264,9 @@ void update_odom() {
   if (theta > PI) theta -= (2 * PI);
   if (theta < -PI) theta += (2 * PI);
   ;
-  // theta_fuse = (0.4 * theta) + (0.6 * theta_imu);
-  x -= dAvg * cos(theta_imu);
-  y -= dAvg * sin(theta_imu);
+  theta_fuse = (percent * theta_imu) + ((1-percent) * theta);
+  x -= dAvg * cos(theta_fuse);
+  y -= dAvg * sin(theta_fuse);
 }
 
 void init_motor() {
@@ -410,7 +412,7 @@ void taskNavigation(void *parameter) {
     if (xSemaphoreTake(odomMutex, pdMS_TO_TICKS(10))) {
       local_x = x;
       local_y = y;
-      local_theta = theta;
+      local_theta = theta_fuse;
       xSemaphoreGive(odomMutex);
     } else {
       // Couldn't get odometry, skip this cycle
@@ -435,6 +437,7 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
     
     float target_x = waypoints[current_waypoint].x;
     float target_y = waypoints[current_waypoint].y;
+    float target_theta = waypoints[current_waypoint].theta_target * (PI / 180.0); // Convert to radians
     
     // Calculate distance and angle to target
     float error_x = target_x - current_x;
@@ -443,16 +446,6 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
     float angle_to_target = atan2(error_y, error_x);
     float angular_error = normalize_angle(angle_to_target - current_theta);
     
-    // If reached waypoint
-    if (distance < distance_threshold) {
-        current_waypoint++;
-        integral = 0;
-        prev_error = 0;
-        nav_state = ROTATING;  // Reset to ROTATING for next waypoint
-        setMotor(0, 0);
-        return;
-    }
-    
     // Calculate dt for PID
     unsigned long current_time = millis();
     float dt = (current_time - last_pid_time) / 1000.0;
@@ -460,8 +453,8 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
     
     // State machine for navigation
     switch (nav_state) {
-        case ROTATING:
-            // Only rotate on first move to new waypoint
+        case ROTATING: {
+            // Initial rotation to face waypoint
             if (abs(angular_error) > angle_threshold) {
                 float rotation_correction = constrain(angular_error * 320, -rotation_speed, rotation_speed);
                 setMotor(rotation_correction, -rotation_correction);
@@ -473,10 +466,22 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
                 integral = 0;
                 prev_error = 0;
                 setMotor(0, 0);
+                delay(100); // Small pause after rotation
             }
             break;
+        }
         
-        case MOVING:
+        case MOVING: {
+            // Check if reached waypoint
+            if (distance < distance_threshold) {
+                nav_state = TURN_TO_FINAL_ANGLE;
+                integral = 0;
+                prev_error = 0;
+                setMotor(0, 0);
+                delay(100); // Small pause before final rotation
+                break;
+            }
+            
             // Dynamic angle correction while moving
             integral += angular_error * dt;
             float derivative = (angular_error - prev_error) / dt;
@@ -493,6 +498,25 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
             setMotor(right_speed, left_speed);
             prev_error = angular_error;
             break;
+        }
+        
+        case TURN_TO_FINAL_ANGLE: {
+            float final_angle_error = normalize_angle(target_theta - current_theta);
+            if (abs(final_angle_error) > angle_threshold) {
+                float final_rotation_correction = constrain(final_angle_error * 320, -rotation_speed, rotation_speed);
+                setMotor(final_rotation_correction, -final_rotation_correction);
+                integral = 0;
+                prev_error = final_angle_error;
+            } else {
+                // Finished with this waypoint
+                setMotor(0, 0);
+                current_waypoint++;
+                nav_state = ROTATING;  // Reset for next waypoint
+                integral = 0;
+                prev_error = 0;
+            }
+            break;
+        }
     }
 }
 
