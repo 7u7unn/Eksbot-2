@@ -39,7 +39,7 @@ float ppr = 11.0;
 float gearbox_R = 45.0;
 float gearbox_L = 45.0;
 float L = 26.9;
-float diameter = 6.7;
+float diameter = 6.6;
 float wheel_k = (PI * diameter);
 
 // Position variables
@@ -90,20 +90,20 @@ struct Waypoint {
 
 #define MAX_WAYPOINTS 5
 Waypoint waypoints[MAX_WAYPOINTS] = {
-  { -60.0, 120.0, 90.0 },
-  { -60.0, 180.0, 90.0 },
-  {-30, 0, 270}
+  { -72.0, 140.0, 90.0 },
+  { -72.0, 200.0, 90.0 },
+  // {-30, 0, 270}
 };
 int current_waypoint = 0;
-int total_waypoints = 3;
+int total_waypoints = 2;
 
 // ============================
 // DUAL PID CONTROL PARAMETERS
 // ============================
 
 // PID for ROTATION (angular control)
-float Kp_rot = 3.0;
-float Ki_rot = 0.4;
+float Kp_rot = 3.2;
+float Ki_rot = 0.15;
 float Kd_rot = 0.6;
 float integral_rot = 0.0;
 float prev_error_rot = 0.0;
@@ -116,7 +116,7 @@ float integral_linear = 0.0;
 float prev_error_linear = 0.0;
 
 // PID for ANGULAR CORRECTION while moving
-float Kp_angular = 2.0;
+float Kp_angular = 2.2;
 float Ki_angular = 0.01;
 float Kd_angular = 0.1;
 float integral_angular = 0.0;
@@ -126,8 +126,8 @@ unsigned long last_pid_time = 0;
 
 // Speed constraints
 float distance_threshold = 1.0;  // cm
-float max_speed = 220;
-float min_speed = 75;
+float max_speed = 230;
+float min_speed = 115;
 
 // Anti-windup limits
 float integral_max = 50.0;
@@ -403,11 +403,11 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
     nav_state = IDLE;
     return;
   }
-  if (current_waypoint == 2) {
-    setMotor(0, 0);
-    nav_state = ANJAY;
-    // return;
-  }
+  // if (current_waypoint == 2) {
+  //   setMotor(0, 0);
+  //   nav_state = ANJAY;
+  //   // return;
+  // }
 
   float target_x = waypoints[current_waypoint].x;
   float target_y = waypoints[current_waypoint].y;
@@ -448,10 +448,10 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
 
           // Deadzone compensation
           int speed = constrain((int)rotation_correction, -rotation_speed, rotation_speed);
-          if (speed > 0 && speed < 75) speed = 75;
-          else if (speed < 0 && speed > -75) speed = -75;
+          if (speed > 0 && speed < min_speed) speed = min_speed;
+          else if (speed < 0 && speed > -min_speed) speed = -min_speed;
 
-          setMotor(speed, -rotation_correction);
+          setMotor(speed, -speed);
         } else {
           // Rotation complete, switch to MOVING
           nav_state = MOVING;
@@ -513,7 +513,7 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
         float angular_correction = (Kp_angular * angular_error) + (Ki_angular * integral_angular) + (Kd_angular * derivative_angular);
 
         // ============================
-        // COMBINE: Linear speed + Angular correction
+        // COMBINE: Linear  + Angular 
         // ============================
         float left_speed = linear_speed - angular_correction;
         float right_speed = linear_speed + angular_correction;
@@ -553,8 +553,8 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
                                               -rotation_speed, rotation_speed);
 
           // Deadzone compensation
-          if (rotation_correction > 0 && rotation_correction < 75) rotation_correction = 75;
-          else if (rotation_correction < 0 && rotation_correction > -75) rotation_correction = -75;
+          if (rotation_correction > 0 && rotation_correction < min_speed) rotation_correction = min_speed;
+          else if (rotation_correction < 0 && rotation_correction > -min_speed) rotation_correction = -min_speed;
 
           setMotor(rotation_correction, -rotation_correction);
         } else {
