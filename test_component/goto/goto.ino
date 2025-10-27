@@ -6,8 +6,8 @@ TAMBAHAN FITUR
 4. LINEFOL
 5. ADD LIFT
 6. WAYPOINT TO PLACE->MANUVER->PLACE->HOME
+MODIFIED: Navigation as function calls instead of continuous waypoint following
 */
-
 
 #define ENA 18
 #define ENB 17
@@ -78,8 +78,15 @@ enum NavigationState {
   MANUVER
 };
 
-NavigationState nav_state = ROTATING;
-;
+NavigationState nav_state = IDLE;
+
+// Navigation control variables
+bool nav_active = false;
+float target_x_global = 0;
+float target_y_global = 0;
+float target_theta_global = 0;
+
+float sudut_manuver =0;
 
 bool dir = 1;
 
@@ -92,28 +99,16 @@ void calib_imu();
 void taskOdometry(void *parameter);
 void taskSerialPrint(void *parameter);
 void taskNavigation(void *parameter);
-
-struct Waypoint {
-  float x;
-  float y;
-  float theta_target;
-};
-
-#define MAX_WAYPOINTS 5
-Waypoint waypoints[MAX_WAYPOINTS] = {
-  // { -73.0, 100.0, 90.0 },
-  { -70.0, 165.0, 90.0 },
-  { -42, 20, 90 },
-  { 0, 0, 90 }
-};
-int current_waypoint = 0;
-int total_waypoints = 3;
-
+void navigate_to_target(float current_x, float current_y, float current_theta_imu, float current_theta_enc);
+void gotoXY(float x_target, float y_target, float theta_target);
+void manuver();
+void stopNav();
+bool isNavigationComplete();
 
 // PID for ROTATION (angular control)
 float Kp_rot = 3.2;
 float Ki_rot = 0.03;  //0.4
-float Kd_rot = 1;   //0.6
+float Kd_rot = 1;     //0.6
 float integral_rot = 0.0;
 float prev_error_rot = 0.0;
 
@@ -152,16 +147,11 @@ int s2 = 32;
 int s3 = 26;
 int SIG_pin = 34;
 
-// int arr_line[12] = 0;
-
-
-void linefol_init();
-void navigate_to_waypoint_threaded(float current_x, float current_y, float current_theta_imu, float current_theta_enc);
 float normalize_angle(float angle);
 float calculate_distance(float x1, float y1, float x2, float y2);
+void reset(float x_u, float y_u, int dir);
 
 void setup() {
-  // linefol_init();
   pinMode(encA1, INPUT);
   pinMode(encB1, INPUT);
   attachInterrupt(encA1, Read_R, RISING);
@@ -207,6 +197,33 @@ void setup() {
 }
 
 void loop() {
+
+  // Go to position
+  gotoXY(-70.0, 165.0, 90.0);
+  while (!isNavigationComplete()) delay(100);
+  
+  manuver(270);
+  while (!isNavigationComplete()) delay(100);
+  
+  // Reset position
+  reset(-42, 160);
+  
+  // Go to position
+  gotoXY(-42, 20, 90);
+  while (!isNavigationComplete()) delay(100);
+  
+  manuver(90);
+  while (!isNavigationComplete()) delay(100);
+  
+  reset(-42, 23);
+  
+  //home 
+  gotoXY(0, 0, 90);
+  while (!isNavigationComplete()) delay(100);
+  
+
+  delay(5000);
+  
 }
 
 float rad2deg(float i) {
@@ -297,7 +314,6 @@ void update_odom() {
   if (theta > PI) theta -= (2 * PI);
   if (theta < -PI) theta += (2 * PI);
 
-  // theta_fuse = (percent_imu * theta_imu) + ((1 - percent_imu) * theta);
   x -= dAvg * cos(theta);
   y -= dAvg * sin(theta);
 }
@@ -389,6 +405,13 @@ void taskNavigation(void *parameter) {
   const TickType_t xFrequency = pdMS_TO_TICKS(20);  // 50Hz
 
   for (;;) {
+    if (!nav_active) {
+      // If navigation is not active, just idle
+      setMotor(0, 0);
+      vTaskDelayUntil(&xLastTime, xFrequency);
+      continue;
+    }
+
     float local_x, local_y, local_theta_imu, local_theta_enc;
     if (xSemaphoreTake(odomMutex, pdMS_TO_TICKS(10))) {
       local_x = x;
@@ -402,7 +425,7 @@ void taskNavigation(void *parameter) {
     }
 
     if (xSemaphoreTake(navMutex, portMAX_DELAY)) {
-      navigate_to_waypoint_threaded(local_x, local_y, local_theta_imu, local_theta_enc);
+      navigate_to_target(local_x, local_y, local_theta_imu, local_theta_enc);
       xSemaphoreGive(navMutex);
     }
 
@@ -410,22 +433,15 @@ void taskNavigation(void *parameter) {
   }
 }
 
-void navigate_to_waypoint_threaded(float current_x, float current_y, float current_theta_imu, float current_theta_enc) {
-  if (current_waypoint >= total_waypoints) {
+void navigate_to_target(float current_x, float current_y, float current_theta_imu, float current_theta_enc) {
+  if (!nav_active) {
     setMotor(0, 0);
-    nav_state = IDLE;
     return;
   }
-  // if (current_waypoint == 1) {
-  //   setMotor(0, 0);
-  //   nav_state = MANUVER;
-  //   // current_theta = 90;
-  //   return;
-  // }
 
-  float target_x = waypoints[current_waypoint].x;
-  float target_y = waypoints[current_waypoint].y;
-  float target_theta = waypoints[current_waypoint].theta_target;
+  float target_x = target_x_global;
+  float target_y = target_y_global;
+  float target_theta = target_theta_global;
 
   // Calculate distance and angle to target
   float error_x = target_x - current_x;
@@ -445,14 +461,9 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
           float derivative_rot = (angular_error - prev_error_rot);
           prev_error_rot = angular_error;
 
-          // PID output
           float pid_output = (Kp_rot * angular_error) + (Ki_rot * integral_rot) + (Kd_rot * derivative_rot);
+          int rotation_correction = constrain((int)(pid_output), -rotation_speed, rotation_speed);
 
-          // Scale to rotation speed
-          int rotation_correction = constrain((int)(pid_output),
-                                              -rotation_speed, rotation_speed);
-
-          // int speed = constrain((int)rotation_correction, -rotation_speed, rotation_speed);
           if (rotation_correction > 0 && rotation_correction < min_speed) rotation_correction = min_speed;
           else if (rotation_correction < 0 && rotation_correction > -min_speed) rotation_correction = -min_speed;
 
@@ -486,11 +497,7 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
           break;
         }
 
-        // ============================
-        // PID #1: LINEAR SPEED CONTROL (Distance-based)
-        // ============================
         float distance_error = distance;
-
         integral_linear += distance_error;
         integral_linear = constrain(integral_linear, integral_min, integral_max);
 
@@ -498,8 +505,6 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
         prev_error_linear = distance_error;
 
         float linear_speed = (Kp_linear * distance_error) + (Ki_linear * integral_linear) + (Kd_linear * derivative_linear);
-
-        // Constrain linear speed
         linear_speed = constrain(linear_speed, min_speed, max_speed);
 
         integral_angular += angular_error;
@@ -510,13 +515,9 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
 
         float angular_correction = (Kp_angular * angular_error) + (Ki_angular * integral_angular) + (Kd_angular * derivative_angular);
 
-        // ============================
-        // COMBINE: Linear  + Angular
-        // ============================
         float left_speed = linear_speed - angular_correction;
         float right_speed = linear_speed + angular_correction;
 
-        // Constrain final speeds
         if (left_speed > 0) {
           left_speed = constrain(left_speed, min_speed, max_speed);
         } else if (left_speed < 0) {
@@ -538,7 +539,6 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
         float final_angle_error = normalize_angle(target_theta - current_theta_imu);
 
         if (abs(final_angle_error) > angle_threshold) {
-          // PID for final rotation
           integral_rot += final_angle_error;
           integral_rot = constrain(integral_rot, integral_min, integral_max);
 
@@ -546,40 +546,25 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
           prev_error_rot = final_angle_error;
 
           float pid_output = (Kp_rot * final_angle_error) + (Ki_rot * integral_rot) + (Kd_rot * derivative_rot);
-
-          int rotation_correction = constrain((int)(pid_output),
-                                              -rotation_speed, rotation_speed);
+          int rotation_correction = constrain((int)(pid_output), -rotation_speed, rotation_speed);
 
           if (rotation_correction > 0 && rotation_correction < min_speed) rotation_correction = min_speed;
           else if (rotation_correction < 0 && rotation_correction > -min_speed) rotation_correction = -min_speed;
 
           setMotor(rotation_correction, -rotation_correction);
         } else {
-          // Waypoint complete
+          // Navigation complete
           setMotor(0, 0);
-
-          if (current_waypoint == 0 || current_waypoint == 1) {
-            current_waypoint++;
-            nav_state = MANUVER;
-          } else {
-            current_waypoint++;
-            nav_state = ROTATING;
-          }
-
+          nav_active = false;
+          nav_state = IDLE;
+          
           integral_rot = 0;
           integral_linear = 0;
           integral_angular = 0;
           prev_error_rot = 0;
           prev_error_linear = 0;
           prev_error_angular = 0;
-          delay(1000);
         }
-        break;
-      }
-
-    case IDLE:
-      {
-        setMotor(0, 0);
         break;
       }
 
@@ -587,14 +572,11 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
       {
         float teta = current_theta_imu;
         if (teta <= 0) {
-
           teta += 360;
         }
-        float final_angle_error = 270 - teta;
-
+        float final_angle_error = sudut_manuver - teta;
 
         if (abs(final_angle_error) > angle_threshold) {
-          // PID for final rotation
           integral_rot += final_angle_error;
           integral_rot = constrain(integral_rot, integral_min, integral_max);
 
@@ -602,30 +584,18 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
           prev_error_rot = final_angle_error;
 
           float pid_output = (Kp_rot * final_angle_error) + (Ki_rot * integral_rot) + (Kd_rot * derivative_rot);
-
-          int rotation_correction = constrain((int)(pid_output),
-                                              -255, 255);
+          int rotation_correction = constrain((int)(pid_output), -255, 255);
 
           if (rotation_correction > 0 && rotation_correction < min_speed) rotation_correction = min_speed;
           else if (rotation_correction < 0 && rotation_correction > -min_speed) rotation_correction = -min_speed;
 
           setMotor(0, -rotation_correction);
-
         } else {
-          // Rotation complete
+          // Maneuver complete
           setMotor(0, 0);
-
-          nav_state = ROTATING;
-          if (current_waypoint == 1) {
-
-            reset(-42, 160, -1);
-          //  "RESET TO -42 160")
-          }
-          if(current_waypoint == 2){
-            reset(-42, 23, -1);
-          }
-          // current_waypoint++;
-
+          nav_active = false;
+          nav_state = IDLE;
+          
           integral_rot = 0;
           integral_linear = 0;
           integral_angular = 0;
@@ -635,7 +605,76 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
         }
         break;
       }
+
+    case IDLE:
+      {
+        setMotor(0, 0);
+        nav_active = false;
+        break;
+      }
   }
+}
+
+
+void gotoXY(float x_target, float y_target, float theta_target) {
+  if (xSemaphoreTake(navMutex, portMAX_DELAY)) {
+    target_x_global = x_target;
+    target_y_global = y_target;
+    target_theta_global = theta_target;
+    
+    nav_state = ROTATING;
+    nav_active = true;
+    
+    // Reset PID variables
+    integral_rot = 0;
+    integral_linear = 0;
+    integral_angular = 0;
+    prev_error_rot = 0;
+    prev_error_linear = 0;
+    prev_error_angular = 0;
+    
+    xSemaphoreGive(navMutex);
+  }
+}
+
+// Function to perform maneuver
+void manuver(float sudut) {
+  if (xSemaphoreTake(navMutex, portMAX_DELAY)) {
+    sudut_manuver = sudut;
+    nav_state = MANUVER;
+    nav_active = true;
+
+    
+    // Reset PID variables
+    integral_rot = 0;
+    integral_linear = 0;
+    integral_angular = 0;
+    prev_error_rot = 0;
+    prev_error_linear = 0;
+    prev_error_angular = 0;
+    
+    xSemaphoreGive(navMutex);
+  }
+}
+
+// Function to stop navigation
+void stopNav() {
+  if (xSemaphoreTake(navMutex, portMAX_DELAY)) {
+    nav_active = false;
+    nav_state = IDLE;
+    setMotor(0, 0);
+    xSemaphoreGive(navMutex);
+  }
+}
+
+// Function to check if navigation is complete
+bool isNavigationComplete() {
+  bool complete = false;
+  if (xSemaphoreTake(navMutex, pdMS_TO_TICKS(10))) {
+    complete = !nav_active;
+    xSemaphoreGive(navMutex);
+  }
+  return complete;
 }
 
 void taskSerialPrint(void *parameter) {
@@ -655,11 +694,9 @@ void taskSerialPrint(void *parameter) {
       Serial.print(" | PWM_L: ");
       Serial.print(current_pwm_left);
 
-      // Calculate and print current distance to target
-      if (current_waypoint < total_waypoints) {
-        float dist = calculate_distance(x, y,
-                                        waypoints[current_waypoint].x,
-                                        waypoints[current_waypoint].y);
+      // Calculate and print current distance to target if nav is active
+      if (nav_active) {
+        float dist = calculate_distance(x, y, target_x_global, target_y_global);
         Serial.print(" | Dist: ");
         Serial.print(dist, 1);
         Serial.print("cm");
@@ -675,10 +712,8 @@ void taskSerialPrint(void *parameter) {
           case IDLE: Serial.print("IDLE"); break;
           case MANUVER: Serial.print("MANUVER"); break;
         }
-        Serial.print(" | WP: ");
-        Serial.print(current_waypoint);
-        Serial.print("/");
-        Serial.println(total_waypoints);
+        Serial.print(" | Active: ");
+        Serial.println(nav_active ? "YES" : "NO");
         xSemaphoreGive(navMutex);
       } else {
         Serial.println("---");
@@ -691,70 +726,10 @@ void taskSerialPrint(void *parameter) {
   }
 }
 
-// float readMux(int channel) {
-//   int controlPin[] = { s0, s1, s2, s3 };
-
-//   int muxChannel[16][4] = {
-//     { 0, 0, 0, 0 },  //channel 0
-//     { 1, 0, 0, 0 },  //channel 1
-//     { 0, 1, 0, 0 },  //channel 2
-//     { 1, 1, 0, 0 },  //channel 3
-//     { 0, 0, 1, 0 },  //channel 4
-//     { 1, 0, 1, 0 },  //channel 5
-//     { 0, 1, 1, 0 },  //channel 6
-//     { 1, 1, 1, 0 },  //channel 7
-//     { 0, 0, 0, 1 },  //channel 8
-//     { 1, 0, 0, 1 },  //channel 9
-//     { 0, 1, 0, 1 },  //channel 10
-//     { 1, 1, 0, 1 },  //channel 11
-//     { 0, 0, 1, 1 },  //channel 12
-//     { 1, 0, 1, 1 },  //channel 13
-//     { 0, 1, 1, 1 },  //channel 14
-//     { 1, 1, 1, 1 }   //channel 15
-//   };
-
-//   for (int i = 0; i < 4; i++) {
-//     digitalWrite(controlPin[i], muxChannel[channel][i]);
-//   }
-
-//   int val = analogRead(SIG_pin);
-
-//   return val;
-// }
-
-// void linefol_init() {
-
-//   pinMode(s0, OUTPUT);
-//   pinMode(s1, OUTPUT);
-//   pinMode(s2, OUTPUT);
-//   pinMode(s3, OUTPUT);
-
-//   digitalWrite(s0, LOW);
-//   digitalWrite(s1, LOW);
-//   digitalWrite(s2, LOW);
-//   digitalWrite(s3, LOW);
-// }
-
-// float line_pos(int heading) {
-//   //1 is for forward and 0 is for backward
-//   if (heading == 1) {
-//     for (int i = 0; i < 6; i++) {
-//       arr_line[i] = readmux(i);
-//       delay(5);
-//     }
-//   } else {
-
-//     for (int i = 6; i < 12; i++) {
-//       arr_line[i] = readmux(i);
-//       delay(5);
-//     }
-
-//   }
-// }
-
-void reset(float x_u, float y_u, int dir) {
-  x = x_u;
-  y = y_u;
-  // theta *= dir;
-  // theta_imu *= dir;
+void reset(float x_u, float y_u) {
+  if (xSemaphoreTake(odomMutex, portMAX_DELAY)) {
+    x = x_u;
+    y = y_u;
+    xSemaphoreGive(odomMutex);
+  }
 }

@@ -38,9 +38,9 @@ float gearbox_ratio = 45.0;
 float theta = PI / 2;             // rad
 
 // Control parameters
-float Kp = 3.0;
-float Ki = 0.4;
-float Kd = 0.6;
+float Kp = 3.2;
+float Ki = 0.03;  //0.4
+float Kd = 1;   //0.6
 float target_angle = 0;
 int rotation_speed = 150;
 float angle_threshold = 0.2;  // degrees
@@ -85,13 +85,13 @@ void rotateToAngle(float target_deg) {
     lastPIDTime = now;
 
     // Komponen PID
-    integral += error * dt;
-    float derivative = (error - last_error) / dt;
+    integral += error ;
+    float derivative = (error - last_error);
     last_error = error;
 
     // Anti-windup
-    if (integral > 50) integral = 50;
-    if (integral < -50) integral = -50;
+    if (integral > 2000) integral = 2000;
+    if (integral < -2000) integral = -2000;
 
     // Hitung output PID
     float output = (Kp * error) + (Ki * integral) + (Kd * derivative);
@@ -100,8 +100,8 @@ void rotateToAngle(float target_deg) {
     int speed = constrain((int)output, -rotation_speed, rotation_speed);
 
     // Deadzone compensation (agar motor tetap bergerak di error kecil)
-    if (speed > 0 && speed < 75) speed = 75;
-    else if (speed < 0 && speed > -75) speed = -75;
+    if (speed > 0 && speed < 95) speed = 95;
+    else if (speed < 0 && speed > -95) speed = -95;
 
     // Set motor (berlawanan arah untuk rotasi)
     setMotor(speed, -speed);
