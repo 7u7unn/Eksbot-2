@@ -1,3 +1,14 @@
+/*
+TAMBAHAN FITUR
+1. MANUVER
+2. POINT LEBIH DEKAT KE GARIS
+3. PID TANPA dt
+4. LINEFOL
+5. ADD LIFT
+6. WAYPOINT TO PLACE->MANUVER->PLACE->HOME
+*/
+
+
 #define ENA 18
 #define ENB 17
 #define IN1 23
@@ -13,9 +24,8 @@ volatile int current_pwm_left = 0;
 
 MPU6050 mpu;
 
-// Variables for calibration and filtering
-const int filter_window_size = 10;
-const int calibration_samples = 700;
+const int filter_window_size = 15;
+const int calibration_samples = 500;
 int filter_index = 0;
 bool filter_full = false;
 unsigned long last_time;
@@ -65,12 +75,13 @@ enum NavigationState {
   MOVING,
   TURN_TO_FINAL_ANGLE,
   IDLE,
-  ANJAY
+  MANUVER
 };
 
 NavigationState nav_state = ROTATING;
-float angle_threshold = 0.5;  // 0.5 degrees
-float rotation_speed = 150;
+;
+
+bool dir = 1;
 
 // Function declarations
 void IRAM_ATTR Read_R();
@@ -90,35 +101,32 @@ struct Waypoint {
 
 #define MAX_WAYPOINTS 5
 Waypoint waypoints[MAX_WAYPOINTS] = {
-  { -72.0, 140.0, 90.0 },
-  { -72.0, 200.0, 90.0 },
-  // {-30, 0, 270}
+  // { -73.0, 100.0, 90.0 },
+  { -70.0, 165.0, 90.0 },
+  { 0, 0, 90 }
 };
 int current_waypoint = 0;
 int total_waypoints = 2;
 
-// ============================
-// DUAL PID CONTROL PARAMETERS
-// ============================
 
 // PID for ROTATION (angular control)
-float Kp_rot = 3.2;
-float Ki_rot = 0.15;
-float Kd_rot = 0.6;
+float Kp_rot = 3.0;
+float Ki_rot = 0.06;  //0.4
+float Kd_rot = 0.1;  //0.6
 float integral_rot = 0.0;
 float prev_error_rot = 0.0;
 
 // PID for LINEAR SPEED (distance-based speed control)
-float Kp_linear = 5.5;   // Proportional gain untuk kecepatan linear
-float Ki_linear = 0.04;  // Integral gain untuk kecepatan linear
-float Kd_linear = 0.1;   // Derivative gain untuk kecepatan linear
+float Kp_linear = 5.5;
+float Ki_linear = 0.004;  //0.04
+float Kd_linear = 0.01;   //0.1
 float integral_linear = 0.0;
 float prev_error_linear = 0.0;
 
 // PID for ANGULAR CORRECTION while moving
 float Kp_angular = 2.2;
-float Ki_angular = 0.01;
-float Kd_angular = 0.1;
+float Ki_angular = 0.001;  //0.01
+float Kd_angular = 0.01;   //0.1
 float integral_angular = 0.0;
 float prev_error_angular = 0.0;
 
@@ -126,25 +134,33 @@ unsigned long last_pid_time = 0;
 
 // Speed constraints
 float distance_threshold = 1.0;  // cm
+float angle_threshold = 0.8;     // 0.5 degrees
+float rotation_speed = 150;
 float max_speed = 230;
-float min_speed = 115;
+float min_speed = 120;
 
-// Anti-windup limits
-float integral_max = 50.0;
-float integral_min = -50.0;
+// windup limits
+float integral_max = 2000.0;
+float integral_min = -2000.0;
 
-// Deadzone compensation
-int deadzone_threshold = 80;
+// LINE FOLLOWING
+//Mux control pins
+int s0 = 25;
+int s1 = 33;
+int s2 = 32;
+int s3 = 26;
+int SIG_pin = 34;
 
-// Target distance for linear PID (setpoint)
-float target_distance_setpoint = 20.0;  // Robot akan maintain kecepatan maksimal hingga 20cm
+// int arr_line[12] = 0;
 
-// Add function declarations
-void navigate_to_waypoint_threaded(float current_x, float current_y, float current_theta);
+
+void linefol_init();
+void navigate_to_waypoint_threaded(float current_x, float current_y, float current_theta_imu, float current_theta_enc);
 float normalize_angle(float angle);
 float calculate_distance(float x1, float y1, float x2, float y2);
 
 void setup() {
+  // linefol_init();
   pinMode(encA1, INPUT);
   pinMode(encB1, INPUT);
   attachInterrupt(encA1, Read_R, RISING);
@@ -158,7 +174,6 @@ void setup() {
   init_motor();
   last_pid_time = millis();
 
-  // Create mutex
   odomMutex = xSemaphoreCreateMutex();
   navMutex = xSemaphoreCreateMutex();
 
@@ -270,11 +285,9 @@ void update_odom() {
   val_R_prev = val_R;
   val_L_prev = val_L;
 
-  // Convert ticks to distance
   float dLeft = d_left_val * ttc_L;
   float dRight = d_right_val * ttc_R;
 
-  // Linear and angular displacement
   float dAvg = (dRight + dLeft) / 2.0;
   float dTheta = (dRight - dLeft) / L;
 
@@ -283,9 +296,9 @@ void update_odom() {
   if (theta > PI) theta -= (2 * PI);
   if (theta < -PI) theta += (2 * PI);
 
-  theta_fuse = (percent_imu * theta_imu) + ((1 - percent_imu) * theta);
-  x -= dAvg * cos(theta_fuse);
-  y -= dAvg * sin(theta_fuse);
+  // theta_fuse = (percent_imu * theta_imu) + ((1 - percent_imu) * theta);
+  x -= dAvg * cos(theta);
+  y -= dAvg * sin(theta);
 }
 
 void init_motor() {
@@ -375,21 +388,20 @@ void taskNavigation(void *parameter) {
   const TickType_t xFrequency = pdMS_TO_TICKS(20);  // 50Hz
 
   for (;;) {
-    // Read odometry data
-    float local_x, local_y, local_theta;
+    float local_x, local_y, local_theta_imu, local_theta_enc;
     if (xSemaphoreTake(odomMutex, pdMS_TO_TICKS(10))) {
       local_x = x;
       local_y = y;
-      local_theta = rad2deg(theta_fuse);
+      local_theta_imu = rad2deg(theta_imu);
+      local_theta_enc = rad2deg(theta);
       xSemaphoreGive(odomMutex);
     } else {
       vTaskDelayUntil(&xLastTime, xFrequency);
       continue;
     }
 
-    // Navigation logic
     if (xSemaphoreTake(navMutex, portMAX_DELAY)) {
-      navigate_to_waypoint_threaded(local_x, local_y, local_theta);
+      navigate_to_waypoint_threaded(local_x, local_y, local_theta_imu, local_theta_enc);
       xSemaphoreGive(navMutex);
     }
 
@@ -397,16 +409,17 @@ void taskNavigation(void *parameter) {
   }
 }
 
-void navigate_to_waypoint_threaded(float current_x, float current_y, float current_theta) {
+void navigate_to_waypoint_threaded(float current_x, float current_y, float current_theta_imu, float current_theta_enc) {
   if (current_waypoint >= total_waypoints) {
     setMotor(0, 0);
     nav_state = IDLE;
     return;
   }
-  // if (current_waypoint == 2) {
+  // if (current_waypoint == 1) {
   //   setMotor(0, 0);
-  //   nav_state = ANJAY;
-  //   // return;
+  //   nav_state = MANUVER;
+  //   // current_theta = 90;
+  //   return;
   // }
 
   float target_x = waypoints[current_waypoint].x;
@@ -418,25 +431,17 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
   float error_y = target_y - current_y;
   float distance = calculate_distance(current_x, current_y, target_x, target_y);
   float angle_to_target = rad2deg(atan2(error_y, error_x));
-  float angular_error = normalize_angle(angle_to_target - current_theta);
+  float angular_error = normalize_angle(angle_to_target - current_theta_imu);
+  float current_theta = current_theta_enc;
 
-  // Calculate dt for PID
-  unsigned long current_time = millis();
-  float dt = (current_time - last_pid_time) / 1000.0;
-  if (dt <= 0) dt = 0.02;  // Prevent division by zero
-  last_pid_time = current_time;
-
-  // State machine for navigation
   switch (nav_state) {
     case ROTATING:
       {
-        // Initial rotation to face waypoint
         if (abs(angular_error) > angle_threshold) {
-          // PID calculation for rotation
-          integral_rot += angular_error * dt;
+          integral_rot += angular_error;
           integral_rot = constrain(integral_rot, integral_min, integral_max);
 
-          float derivative_rot = (angular_error - prev_error_rot) / dt;
+          float derivative_rot = (angular_error - prev_error_rot);
           prev_error_rot = angular_error;
 
           // PID output
@@ -446,14 +451,12 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
           int rotation_correction = constrain((int)(pid_output),
                                               -rotation_speed, rotation_speed);
 
-          // Deadzone compensation
-          int speed = constrain((int)rotation_correction, -rotation_speed, rotation_speed);
-          if (speed > 0 && speed < min_speed) speed = min_speed;
-          else if (speed < 0 && speed > -min_speed) speed = -min_speed;
+          // int speed = constrain((int)rotation_correction, -rotation_speed, rotation_speed);
+          if (rotation_correction > 0 && rotation_correction < min_speed) rotation_correction = min_speed;
+          else if (rotation_correction < 0 && rotation_correction > -min_speed) rotation_correction = -min_speed;
 
-          setMotor(speed, -speed);
+          setMotor(rotation_correction, -rotation_correction);
         } else {
-          // Rotation complete, switch to MOVING
           nav_state = MOVING;
           integral_rot = 0;
           integral_linear = 0;
@@ -469,7 +472,6 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
 
     case MOVING:
       {
-        // Check if reached waypoint
         if (distance < distance_threshold) {
           nav_state = TURN_TO_FINAL_ANGLE;
           integral_rot = 0;
@@ -479,7 +481,7 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
           prev_error_linear = 0;
           prev_error_angular = 0;
           setMotor(0, 0);
-          delay(150);
+          delay(200);
           break;
         }
 
@@ -488,32 +490,27 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
         // ============================
         float distance_error = distance;
 
-        integral_linear += distance_error * dt;
+        integral_linear += distance_error;
         integral_linear = constrain(integral_linear, integral_min, integral_max);
 
-        float derivative_linear = (distance_error - prev_error_linear) / dt;
+        float derivative_linear = (distance_error - prev_error_linear);
         prev_error_linear = distance_error;
 
-        // PID output untuk kecepatan linear
         float linear_speed = (Kp_linear * distance_error) + (Ki_linear * integral_linear) + (Kd_linear * derivative_linear);
 
         // Constrain linear speed
         linear_speed = constrain(linear_speed, min_speed, max_speed);
 
-        // ============================
-        // PID #2: ANGULAR CORRECTION (Angle-based)
-        // ============================
-        integral_angular += angular_error * dt;
+        integral_angular += angular_error;
         integral_angular = constrain(integral_angular, integral_min, integral_max);
 
-        float derivative_angular = (angular_error - prev_error_angular) / dt;
+        float derivative_angular = (angular_error - prev_error_angular);
         prev_error_angular = angular_error;
 
-        // PID output untuk koreksi angular
         float angular_correction = (Kp_angular * angular_error) + (Ki_angular * integral_angular) + (Kd_angular * derivative_angular);
 
         // ============================
-        // COMBINE: Linear  + Angular 
+        // COMBINE: Linear  + Angular
         // ============================
         float left_speed = linear_speed - angular_correction;
         float right_speed = linear_speed + angular_correction;
@@ -537,14 +534,14 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
 
     case TURN_TO_FINAL_ANGLE:
       {
-        float final_angle_error = normalize_angle(target_theta - current_theta);
+        float final_angle_error = normalize_angle(target_theta - current_theta_imu);
 
         if (abs(final_angle_error) > angle_threshold) {
           // PID for final rotation
-          integral_rot += final_angle_error * dt;
+          integral_rot += final_angle_error;
           integral_rot = constrain(integral_rot, integral_min, integral_max);
 
-          float derivative_rot = (final_angle_error - prev_error_rot) / dt;
+          float derivative_rot = final_angle_error - prev_error_rot;
           prev_error_rot = final_angle_error;
 
           float pid_output = (Kp_rot * final_angle_error) + (Ki_rot * integral_rot) + (Kd_rot * derivative_rot);
@@ -552,7 +549,6 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
           int rotation_correction = constrain((int)(pid_output),
                                               -rotation_speed, rotation_speed);
 
-          // Deadzone compensation
           if (rotation_correction > 0 && rotation_correction < min_speed) rotation_correction = min_speed;
           else if (rotation_correction < 0 && rotation_correction > -min_speed) rotation_correction = -min_speed;
 
@@ -560,8 +556,15 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
         } else {
           // Waypoint complete
           setMotor(0, 0);
-          current_waypoint++;
-          nav_state = ROTATING;
+
+          if (current_waypoint == 0) {
+            current_waypoint++;
+            nav_state = MANUVER;
+          } else {
+            current_waypoint++;
+            nav_state = ROTATING;
+          }
+
           integral_rot = 0;
           integral_linear = 0;
           integral_angular = 0;
@@ -578,16 +581,22 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
         break;
       }
 
-    case ANJAY:
+    case MANUVER:
       {
-        float final_angle_error = -90 - current_theta;  // Gunakan current_theta
+        float teta = current_theta_imu;
+        if (teta <= 0) {
+
+          teta += 360;
+        }
+        float final_angle_error = 270-teta;
+
 
         if (abs(final_angle_error) > angle_threshold) {
           // PID for final rotation
-          integral_rot += final_angle_error * dt;
+          integral_rot += final_angle_error;
           integral_rot = constrain(integral_rot, integral_min, integral_max);
 
-          float derivative_rot = (final_angle_error - prev_error_rot) / dt;
+          float derivative_rot = (final_angle_error - prev_error_rot);
           prev_error_rot = final_angle_error;
 
           float pid_output = (Kp_rot * final_angle_error) + (Ki_rot * integral_rot) + (Kd_rot * derivative_rot);
@@ -595,20 +604,19 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
           int rotation_correction = constrain((int)(pid_output),
                                               -255, 255);
 
-          // Deadzone compensation
-          if (rotation_correction > 0 && rotation_correction < 100) rotation_correction = 100;
-          else if (rotation_correction < 0 && rotation_correction > -100) rotation_correction = -100;
+          if (rotation_correction > 0 && rotation_correction < min_speed + 10) rotation_correction = min_speed + 10;
+          else if (rotation_correction < 0 && rotation_correction > -min_speed + 10) rotation_correction = -min_speed + 10;
 
-          // RODA KANAN SEBAGAI POROS (kanan = 0, kiri bergerak)
-          // Serial.println(rotation_correction);
-          setMotor(0, rotation_correction);
+          setMotor(0, -rotation_correction);
 
         } else {
           // Rotation complete
           setMotor(0, 0);
 
           nav_state = ROTATING;
-          // current_waypoint++;
+          current_waypoint++;
+
+          reset(-73,160,-1);
 
           integral_rot = 0;
           integral_linear = 0;
@@ -619,57 +627,126 @@ void navigate_to_waypoint_threaded(float current_x, float current_y, float curre
         }
         break;
       }
-  }}
+  }
+}
 
-  void taskSerialPrint(void *parameter) {
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(200);
+void taskSerialPrint(void *parameter) {
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  const TickType_t xFrequency = pdMS_TO_TICKS(200);
 
-    for (;;) {
-      if (xSemaphoreTake(odomMutex, pdMS_TO_TICKS(10))) {
-        Serial.print("X: ");
-        Serial.print(x, 2);
-        Serial.print(" | Y: ");
-        Serial.print(y, 2);
-        Serial.print(" | θ: ");
-        Serial.print(theta_fuse * (180 / PI), 2);
-        Serial.print("° | PWM_R: ");
-        Serial.print(current_pwm_right);
-        Serial.print(" | PWM_L: ");
-        Serial.print(current_pwm_left);
+  for (;;) {
+    if (xSemaphoreTake(odomMutex, pdMS_TO_TICKS(10))) {
+      Serial.print("X: ");
+      Serial.print(x, 2);
+      Serial.print(" | Y: ");
+      Serial.print(y, 2);
+      Serial.print(" | θ: ");
+      Serial.print(theta_imu * (180 / PI), 2);
+      Serial.print("° | PWM_R: ");
+      Serial.print(current_pwm_right);
+      Serial.print(" | PWM_L: ");
+      Serial.print(current_pwm_left);
 
-        // Calculate and print current distance to target
-        if (current_waypoint < total_waypoints) {
-          float dist = calculate_distance(x, y,
-                                          waypoints[current_waypoint].x,
-                                          waypoints[current_waypoint].y);
-          Serial.print(" | Dist: ");
-          Serial.print(dist, 1);
-          Serial.print("cm");
-        }
-
-        Serial.print(" | State: ");
-
-        if (xSemaphoreTake(navMutex, pdMS_TO_TICKS(5))) {
-          switch (nav_state) {
-            case ROTATING: Serial.print("ROT"); break;
-            case MOVING: Serial.print("MOV"); break;
-            case TURN_TO_FINAL_ANGLE: Serial.print("FIN"); break;
-            case IDLE: Serial.print("IDLE"); break;
-            case ANJAY: Serial.print("ANJAY"); break;
-          }
-          Serial.print(" | WP: ");
-          Serial.print(current_waypoint);
-          Serial.print("/");
-          Serial.println(total_waypoints);
-          xSemaphoreGive(navMutex);
-        } else {
-          Serial.println("---");
-        }
-
-        xSemaphoreGive(odomMutex);
+      // Calculate and print current distance to target
+      if (current_waypoint < total_waypoints) {
+        float dist = calculate_distance(x, y,
+                                        waypoints[current_waypoint].x,
+                                        waypoints[current_waypoint].y);
+        Serial.print(" | Dist: ");
+        Serial.print(dist, 1);
+        Serial.print("cm");
       }
 
-      vTaskDelayUntil(&xLastWakeTime, xFrequency);
+      Serial.print(" | State: ");
+
+      if (xSemaphoreTake(navMutex, pdMS_TO_TICKS(5))) {
+        switch (nav_state) {
+          case ROTATING: Serial.print("ROT"); break;
+          case MOVING: Serial.print("MOV"); break;
+          case TURN_TO_FINAL_ANGLE: Serial.print("FIN"); break;
+          case IDLE: Serial.print("IDLE"); break;
+          case MANUVER: Serial.print("MANUVER"); break;
+        }
+        Serial.print(" | WP: ");
+        Serial.print(current_waypoint);
+        Serial.print("/");
+        Serial.println(total_waypoints);
+        xSemaphoreGive(navMutex);
+      } else {
+        Serial.println("---");
+      }
+
+      xSemaphoreGive(odomMutex);
     }
+
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
+}
+
+// float readMux(int channel) {
+//   int controlPin[] = { s0, s1, s2, s3 };
+
+//   int muxChannel[16][4] = {
+//     { 0, 0, 0, 0 },  //channel 0
+//     { 1, 0, 0, 0 },  //channel 1
+//     { 0, 1, 0, 0 },  //channel 2
+//     { 1, 1, 0, 0 },  //channel 3
+//     { 0, 0, 1, 0 },  //channel 4
+//     { 1, 0, 1, 0 },  //channel 5
+//     { 0, 1, 1, 0 },  //channel 6
+//     { 1, 1, 1, 0 },  //channel 7
+//     { 0, 0, 0, 1 },  //channel 8
+//     { 1, 0, 0, 1 },  //channel 9
+//     { 0, 1, 0, 1 },  //channel 10
+//     { 1, 1, 0, 1 },  //channel 11
+//     { 0, 0, 1, 1 },  //channel 12
+//     { 1, 0, 1, 1 },  //channel 13
+//     { 0, 1, 1, 1 },  //channel 14
+//     { 1, 1, 1, 1 }   //channel 15
+//   };
+
+//   for (int i = 0; i < 4; i++) {
+//     digitalWrite(controlPin[i], muxChannel[channel][i]);
+//   }
+
+//   int val = analogRead(SIG_pin);
+
+//   return val;
+// }
+
+// void linefol_init() {
+
+//   pinMode(s0, OUTPUT);
+//   pinMode(s1, OUTPUT);
+//   pinMode(s2, OUTPUT);
+//   pinMode(s3, OUTPUT);
+
+//   digitalWrite(s0, LOW);
+//   digitalWrite(s1, LOW);
+//   digitalWrite(s2, LOW);
+//   digitalWrite(s3, LOW);
+// }
+
+// float line_pos(int heading) {
+//   //1 is for forward and 0 is for backward
+//   if (heading == 1) {
+//     for (int i = 0; i < 6; i++) {
+//       arr_line[i] = readmux(i);
+//       delay(5);
+//     }
+//   } else {
+
+//     for (int i = 6; i < 12; i++) {
+//       arr_line[i] = readmux(i);
+//       delay(5);
+//     }
+
+//   }
+// }
+
+void reset(float x_u, float y_u, int dir) {
+  x = x_u;
+  y = y_u;
+  theta *= dir;
+  theta_imu *= dir;
+}
