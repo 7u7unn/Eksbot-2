@@ -4,11 +4,14 @@
 #define IN4 14
 #define ENA 21
 #define ENB 27
+#define atas 26
+#define bawah 25
 
-bool start = 1;
+int lim_atas = 1;
+int lim_bawah = 1;
 
 void setup() {
-  // put your setup code here, to run once:
+  Serial.begin(115200);
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT);
@@ -16,50 +19,25 @@ void setup() {
   pinMode(ENA, OUTPUT);
   pinMode(ENB, OUTPUT);
 
-  // digitalWrite(IN1, LOW);
-  // digitalWrite(in1, LOW);
-  // digitalWrite(in1, LOW);
-  // digitalWrite(in1, LOW);
+  pinMode(atas, INPUT_PULLUP);
+  pinMode(bawah, INPUT_PULLUP);
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-  if (start) {
+  // lim_bawah = digitalRead(bawah);
+  // lim_atas = digitalRead(atas);
+  // Serial.printf("atas: %d || bawah %d", lim_atas, lim_bawah);
+  // Serial.println();
+  // delay(10);
 
-    setMotor(180, 0);
-    delay(1000);
-    setMotor(-170, 0);
-    delay(300);
-    setMotor(0,0);
-    start = 0;
-  }
+
+  pick();
+  delay(3000);
+  put();
+  delay(3000);
 }
 
-
-
 void setMotor(int spdKanan, int spdKiri) {
-  // Apply constraints with deadzone compensation
-  // if (spdKiri != 0) {
-  //   if (spdKiri > 0) {
-  //     spdKiri = constrain(spdKiri, min_speed, max_speed);
-  //   } else {
-  //     spdKiri = constrain(spdKiri, -max_speed, -min_speed);
-  //   }
-  // }
-
-  // if (spdKanan != 0) {
-  //   if (spdKanan > 0) {
-  //     spdKanan = constrain(spdKanan, min_speed, max_speed);
-  //   } else {
-  //     spdKanan = constrain(spdKanan, -max_speed, -min_speed);
-  //   }
-  // }
-
-  // // Store PWM values for monitoring
-  // current_pwm_right = spdKanan;
-  // current_pwm_left = spdKiri;
-
-  // Motor kanan
   if (spdKanan > 0) {
     digitalWrite(IN1, HIGH);
     digitalWrite(IN2, LOW);
@@ -72,7 +50,6 @@ void setMotor(int spdKanan, int spdKiri) {
   }
   analogWrite(ENA, constrain(abs(spdKanan), 0, 255));
 
-  // Motor kiri
   if (spdKiri > 0) {
     digitalWrite(IN3, HIGH);
     digitalWrite(IN4, LOW);
@@ -84,4 +61,24 @@ void setMotor(int spdKanan, int spdKiri) {
     digitalWrite(IN4, LOW);
   }
   analogWrite(ENB, constrain(abs(spdKiri), 0, 255));
+}
+
+void pick() {
+  lim_atas = digitalRead(atas);
+  while (lim_atas == 1) {  // HIGH = not pressed
+    setMotor(180, 0);
+    delay(50);
+    lim_atas = digitalRead(atas);
+  }
+  setMotor(0, 0);
+}
+
+void put() {
+  lim_bawah = digitalRead(bawah);
+  while (lim_bawah == 1) {
+    setMotor(-170, 0);
+    delay(10);
+    lim_bawah = digitalRead(bawah);
+  }
+  setMotor(0, 0);
 }
