@@ -280,7 +280,7 @@ void init_motor() {
 
 void setMotor(int spdKanan, int spdKiri) {
 
-  if (spdKiri < 0) {
+  if (spdKiri < 0) {g
     spdKiri = constrain(spdKiri, -max_speed, -min_speed);
   } else if (spdKiri > 0) {
 

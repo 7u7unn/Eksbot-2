@@ -12,11 +12,11 @@
 
 #include <Wire.h>
 #include <MPU6050.h>
-bool finish = false;
 
 MPU6050 mpu;
+bool finish = false;
 
-const int filter_window_size = 10;
+const int filter_window_size = 5;
 const int calibration_samples = 700;
 int filter_index = 0;
 bool filter_full = false;
@@ -33,10 +33,10 @@ long val_L_prev = 0;
 
 // Robot parameters
 float ppr = 11.0;
-float gearbox_R = 50.0;
+float gearbox_R = 49.0;
 float gearbox_L = 50.0;
-float L = 30.0;              // Jarak antar roda (cm)
-float diameter = 7.0;        // Diameter roda (cm)
+float L = 30.0;        // Jarak antar roda (cm)
+float diameter = 7.0;  // Diameter roda (cm)
 float wheel_k = (PI * diameter);
 
 // Position variables
@@ -57,44 +57,51 @@ TaskHandle_t taskNavHandle = NULL;
 
 enum NavigationState {
   ROTATING,
-  MOVING,
-  TURN_TO_FINAL_ANGLE,
-  IDLE
+  MOVING_STRAIGHT,
+  IDLE,
+  MANUVER
 };
 
 NavigationState nav_state = IDLE;
 
 bool command_active = false;
-float command_target_x = 0;
-float command_target_y = 0;
-float command_target_theta = 0;
+float command_target_distance = 0;
+float command_target_angle = 0;
+float initial_heading = 0;  // For maintaining heading during straight movement
+float start_x = 0;
+float start_y = 0;
 
 enum CommandType {
   CMD_NONE,
-  CMD_MOVE_TO,
+  CMD_STRAIGHT,
   CMD_ROTATE,
+  CMD_MANUVER,
   CMD_IDLE
 };
 CommandType current_command = CMD_NONE;
 
-// PID for ROTATION 
+// Add near other global vars
+float manuver_start_angle = 0;  // Starting IMU angle when maneuver begins
+float manuver_target_delta = 180.0; // Always 180° CCW
+
+// PID for ROTATION
 float Kp_rot = 2;
 float Ki_rot = 0.0;
-float Kd_rot = 4;
+float Kd_rot = 3.5;
 float integral_rot = 0.0;
 float prev_error_rot = 0.0;
 
-// PID for LINEAR SPEED 
-float Kp_linear = 4.5;
+// PID for LINEAR SPEED
+float Kp_linear = 1.2;
 float Ki_linear = 0.004;
 float Kd_linear = 0.02;
 float integral_linear = 0.0;
 float prev_error_linear = 0.0;
 
-// PID for ANGULAR CORRECTION
-float Kp_angular = 4;
-float Ki_angular = 0.001;
-float Kd_angular = 0.01;
+// PID for ANGULAR CORRECTION (heading correction during straight movement)
+float Kp_angular = 4.4;
+float Ki_angular = 0.0;
+float Kd_angular = 1;
 float integral_angular = 0.0;
 float prev_error_angular = 0.0;
 
@@ -102,16 +109,12 @@ float prev_error_angular = 0.0;
 float distance_threshold = 1.0;  // cm
 float angle_threshold = 0.5;     // degrees
 float rotation_speed = 150;
-float max_speed = 180;
-float min_speed = 100;
+float max_speed = 170;
+float min_speed = 110;
 
 // windup limits
 float integral_max = 2000.0;
 float integral_min = -2000.0;
-
-// Dummy waypoint counters (used in serial print)
-int current_waypoint = 0;
-int total_waypoints = 0;
 
 volatile int current_pwm_right = 0;
 volatile int current_pwm_left = 0;
@@ -128,12 +131,12 @@ void taskNavigation(void *parameter);
 void init_motor();
 void setMotor(int spdKanan, int spdKiri);
 
-void move_to(float target_x, float target_y, float target_theta);
-void rotate(float target_angle);
+void straight(float distance);
+void rotate(float degrees);
 void idle();
 bool is_command_done();
 
-void execute_move_to(float current_x, float current_y, float current_theta_imu, float current_theta_enc);
+void execute_straight(float current_x, float current_y, float current_theta_enc);
 void execute_rotate(float current_theta_imu);
 
 float normalize_angle(float angle);
@@ -145,7 +148,6 @@ float rad2deg(float i);
 void setup() {
   pinMode(encA1, INPUT);
   pinMode(encB1, INPUT);
-  
   attachInterrupt(encA1, Read_R, RISING);
 
   pinMode(encA2, INPUT);
@@ -153,38 +155,70 @@ void setup() {
   attachInterrupt(encA2, Read_L, RISING);
 
   Serial.begin(115200);
-  calib_imu();
   init_motor();
+  uint16_t start_time = millis();
+  while(millis()-start_time < 6000){
+    continue;
+  }
+  calib_imu();
 
   odomMutex = xSemaphoreCreateMutex();
   navMutex = xSemaphoreCreateMutex();
 
   xTaskCreatePinnedToCore(taskOdometry, "OdometryTask", 4096, NULL, 2, &taskOdomHandle, 1);
   xTaskCreatePinnedToCore(taskNavigation, "NavigationTask", 4096, NULL, 2, &taskNavHandle, 1);
+  // uint16_t start_time = millis();
   xTaskCreatePinnedToCore(taskSerialPrint, "SerialTask", 4096, NULL, 0, &taskSerialHandle, 0);
+
+  
 }
 
 void loop() {
+  // Example usage:
+  // Rotate to absolute angles and move straight
+  if(!finish){
+
+  // delay(1000);
+  // rotate(135);
+  // delay(1000);
+  // rotate(180);
+  // delay(1000);
+  straight(180, 90);  // Move forward 50 cm
+  // manuver();
+  delay(1000);
+  straight(120, -90);
+  delay(1000);
+  rotate(90);
+  // delay(1000);
+  // rotate(90);  // Rotate to 90° (East) - absolute angle
+  // delay(1000);
+  // manuver();
+  finish = true;
+  }
+
+  // rotate(135);  // Rotate to 0° (North) - absolute angle
   // rotate(0);
-  // while (!is_command_done()) {
-  //     delay(100);
-  //   }
+  // delay(1000);;
+  // straight(120);
+  // delay(1000);
+  // rotate(90);
+
+  // delay(1000);
+  // straight(50);  // Move forward 50 cm
+
+  // // rotate(180);   // Rotate to 180° (South) - absolute angle
+  // // delay(1000);
+
+  // straight(-60);  // Move forward 50 cm
   // delay(1000);
 
-  // for (int i = 1; i <= 4; i++) {
-  //   rotate(i * 90);
-  //   while (!is_command_done()) {
-  //     delay(100);
-  //   }
-  //   delay(1000);
-  // }
-  move_to(-60,60,90);
-  delay(1000);
-  rotate(180);
-  delay(1000);
-  move_to(0,0,90);
+  // rotate(90);   // Rotate to -90° (West) - absolute angle
+  // delay(1000);
 
-  vTaskSuspend(NULL); // Hentikan loop utama
+  // straight(50);  // Move forward 50 cm
+  // delay(1000);
+
+  // vTaskSuspend(NULL);  // Hentikan loop utama
 }
 
 // ==================== HELPER FUNCTIONS ====================
@@ -204,7 +238,7 @@ void IRAM_ATTR Read_L() {
 }
 
 void calib_imu() {
-  Wire.begin(21, 22, 100000); // SCL=21, SDA=22
+  Wire.begin(21, 22, 100000);  // SCL=21, SDA=22
   mpu.initialize();
   mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);
 
@@ -237,19 +271,18 @@ void update_imu() {
 
   int16_t gyroZ_raw = mpu.getRotationZ();
   float gyroZ = (gyroZ_raw - gyroZ_calibration) / 131.0;
+    gyroZ_values[filter_index] = gyroZ;
+  filter_index = (filter_index + 1) % filter_window_size;
+  if (filter_index == 0) filter_full = true;
 
-  // gyroZ_values[filter_index] = gyroZ;
-  // filter_index = (filter_index + 1) % filter_window_size;
-  // if (filter_index == 0) filter_full = true;
+  gyroZ_avg = 0;
+  int count = filter_full ? filter_window_size : filter_index;
+  for (int i = 0; i < count; i++) {
+    gyroZ_avg += gyroZ_values[i];
+  }
+  gyroZ_avg /= count;
 
-  // gyroZ_avg = 0;
-  // int count = filter_full ? filter_window_size : filter_index;
-  // for (int i = 0; i < count; i++) {
-  //   gyroZ_avg += gyroZ_values[i];
-  // }
-  // gyroZ_avg /= count;
-
-  theta_imu -= (PI / 180.0) * gyroZ * dt;
+  theta_imu -= (PI / 180.0) * gyroZ_avg * dt;
   if (theta_imu >= 2 * PI) theta_imu -= 2 * PI;
   if (theta_imu < 0) theta_imu += 2 * PI;
 }
@@ -270,8 +303,8 @@ void update_odom() {
   if (theta >= 2 * PI) theta -= 2 * PI;
   if (theta < 0) theta += 2 * PI;
 
-  x -= dAvg * cos(theta);
-  y -= dAvg * sin(theta);
+  x -= dAvg * cos(theta_imu);
+  y -= dAvg * sin(theta_imu);
 }
 
 void init_motor() {
@@ -285,14 +318,14 @@ void init_motor() {
 
 void setMotor(int spdKanan, int spdKiri) {
   // Batasi kecepatan
-  if (spdKiri != 0) {
-    if (spdKiri > 0) spdKiri = constrain(spdKiri, min_speed, max_speed);
-    else spdKiri = constrain(spdKiri, -max_speed, -min_speed);
-  }
-  if (spdKanan != 0) {
-    if (spdKanan > 0) spdKanan = constrain(spdKanan, min_speed, max_speed);
-    else spdKanan = constrain(spdKanan, -max_speed, -min_speed);
-  }
+  // if (spdKiri != 0) {
+  //   if (spdKiri > 0) spdKiri = constrain(spdKiri, min_speed, max_speed);
+  //   else spdKiri = constrain(spdKiri, -max_speed, -min_speed);
+  // }
+  // if (spdKanan != 0) {
+  //   if (spdKanan > 0) spdKanan = constrain(spdKanan, min_speed, max_speed);
+  //   else spdKanan = constrain(spdKanan, -max_speed, -min_speed);
+  // }
 
   current_pwm_right = spdKanan;
   current_pwm_left = spdKiri;
@@ -352,7 +385,7 @@ void taskOdometry(void *parameter) {
 
 void taskNavigation(void *parameter) {
   TickType_t xLastTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(20);
+  const TickType_t xFrequency = pdMS_TO_TICKS(15);
 
   for (;;) {
     float local_x, local_y, local_theta_imu, local_theta_enc;
@@ -370,8 +403,8 @@ void taskNavigation(void *parameter) {
     if (xSemaphoreTake(navMutex, portMAX_DELAY) == pdTRUE) {
       if (command_active) {
         switch (current_command) {
-          case CMD_MOVE_TO:
-            execute_move_to(local_x, local_y, local_theta_imu, local_theta_enc);
+          case CMD_STRAIGHT:
+            execute_straight(local_x, local_y, local_theta_imu);
             break;
           case CMD_ROTATE:
             execute_rotate(local_theta_imu);
@@ -379,6 +412,9 @@ void taskNavigation(void *parameter) {
           case CMD_IDLE:
             setMotor(0, 0);
             break;
+          case CMD_MANUVER:
+             exec_manuver(local_theta_imu);
+
           default:
             break;
         }
@@ -417,14 +453,10 @@ void taskSerialPrint(void *parameter) {
       if (xSemaphoreTake(navMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
         switch (nav_state) {
           case ROTATING: Serial.print("ROTATING"); break;
-          case MOVING: Serial.print("MOVING"); break;
-          case TURN_TO_FINAL_ANGLE: Serial.print("TURN_TO_FINAL"); break;
+          case MOVING_STRAIGHT: Serial.print("MOVING_STRAIGHT"); break;
           case IDLE: Serial.print("IDLE"); break;
         }
-        Serial.print(" | WP: ");
-        Serial.print(current_waypoint);
-        Serial.print("/");
-        Serial.println(total_waypoints);
+        Serial.println();
         xSemaphoreGive(navMutex);
       } else {
         Serial.println("---");
@@ -438,42 +470,82 @@ void taskSerialPrint(void *parameter) {
 
 // ==================== COMMAND FUNCTIONS ====================
 
-void move_to(float target_x, float target_y, float target_theta) {
+void straight(float distance, float heading) {
   if (xSemaphoreTake(navMutex, pdMS_TO_TICKS(25)) == pdTRUE) {
-    command_target_x = target_x;
-    command_target_y = target_y;
-    command_target_theta = target_theta;
-    current_command = CMD_MOVE_TO;
-    command_active = true;
-    nav_state = ROTATING;
+    if (xSemaphoreTake(odomMutex, pdMS_TO_TICKS(25)) == pdTRUE) {
+      // Store starting position and heading (using encoder theta)
+      start_x = x;
+      start_y = y;
+      initial_heading = heading;  // Use encoder theta for straight movement
+      xSemaphoreGive(odomMutex);
+    }
 
-    integral_rot = integral_linear = integral_angular = 0;
-    prev_error_rot = prev_error_linear = prev_error_angular = 0;
+    command_target_distance = distance;
+    current_command = CMD_STRAIGHT;
+    command_active = true;
+    nav_state = MOVING_STRAIGHT;
+
+    // Reset PID integrals
+    integral_linear = integral_angular = 0;
+    prev_error_linear = prev_error_angular = 0;
 
     xSemaphoreGive(navMutex);
   }
+
   while (!is_command_done()) {
-      delay(100);
-    }
+    delay(100);
+  }
 }
 
-void rotate(float target_angle) {
+// void manuver()
+
+void rotate(float degrees) {
   if (xSemaphoreTake(navMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-    command_target_theta = target_angle;
+    // Set target angle as absolute global angle (not relative)
+    command_target_angle = degrees;
+
+    // Normalize to -180 to 180 range
+    while (command_target_angle > 180) command_target_angle -= 360;
+    while (command_target_angle < -180) command_target_angle += 360;
+
     current_command = CMD_ROTATE;
     command_active = true;
     nav_state = ROTATING;
 
-    integral_rot = integral_linear = integral_angular = 0;
-    prev_error_rot = prev_error_linear = prev_error_angular = 0;
+    // Reset PID integrals
+    integral_rot = 0;
+    prev_error_rot = 0;
 
     xSemaphoreGive(navMutex);
   }
-  while (!is_command_done()) {
-      delay(100);
-    }
-}
 
+  while (!is_command_done()) {
+    delay(100);
+  }
+}
+void manuver() {  // No parameter needed!
+  if (xSemaphoreTake(navMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    // Capture current IMU heading as start
+    if (xSemaphoreTake(odomMutex, pdMS_TO_TICKS(25)) == pdTRUE) {
+      manuver_start_angle = rad2deg(theta_imu);
+      xSemaphoreGive(odomMutex);
+    }
+
+    current_command = CMD_MANUVER;
+    command_active = true;
+    nav_state = MANUVER;
+
+    // Reset PID
+    integral_rot = 0;
+    prev_error_rot = 0;
+
+    xSemaphoreGive(navMutex);
+  }
+
+  while (!is_command_done()) {
+    delay(100);
+  }
+}
 void idle() {
   if (xSemaphoreTake(navMutex, pdMS_TO_TICKS(25)) == pdTRUE) {
     current_command = CMD_IDLE;
@@ -495,113 +567,102 @@ bool is_command_done() {
 
 // ==================== EXECUTION FUNCTIONS ====================
 
-void execute_move_to(float current_x, float current_y, float current_theta_imu, float current_theta_enc) {
-  float error_x = command_target_x - current_x;
-  float error_y = command_target_y - current_y;
-  float distance = calculate_distance(current_x, current_y, command_target_x, command_target_y);
-  float angle_to_target = rad2deg(atan2(error_y, error_x));
-  float angular_error = normalize_angle(angle_to_target - current_theta_imu);
-  float angular_error_enc = normalize_angle(angle_to_target - current_theta_enc);
+void execute_straight(float current_x, float current_y, float current_theta_enc) {
+  // Calculate distance traveled from start position
+  float distance_traveled = calculate_distance(start_x, start_y, current_x, current_y);
+  float remaining_distance = abs(command_target_distance) - distance_traveled;
 
-  switch (nav_state) {
-    case ROTATING:
-    {
-      if (abs(angular_error) > angle_threshold) {
-        integral_rot += angular_error;
-        integral_rot = constrain(integral_rot, integral_min, integral_max);
-        float derivative_rot = (angular_error - prev_error_rot);
-        prev_error_rot = angular_error;
-        float pid_output = (Kp_rot * angular_error) + (Ki_rot * integral_rot) + (Kd_rot * derivative_rot);
-        int rotation_correction = constrain((int)pid_output, -rotation_speed, rotation_speed);
-        if (rotation_correction > 0 && rotation_correction < min_speed) rotation_correction = min_speed;
-        else if (rotation_correction < 0 && rotation_correction > -min_speed) rotation_correction = -min_speed;
-        setMotor(rotation_correction, -rotation_correction);
-      } else {
-        nav_state = MOVING;
-        integral_rot = integral_linear = integral_angular = 0;
-        prev_error_rot = prev_error_linear = prev_error_angular = 0;
-        setMotor(0, 0);
-        delay(150);
-      }
-      break;
-    }
+  // Determine direction (forward or backward)
+  int direction = (command_target_distance > 0) ? 1 : -1;
 
-    case MOVING:
-    {
-      if (distance < distance_threshold) {
-        nav_state = TURN_TO_FINAL_ANGLE;
-        integral_rot = integral_linear = integral_angular = 0;
-        prev_error_rot = prev_error_linear = prev_error_angular = 0;
-        setMotor(0, 0);
-        delay(200);
-        break;
-      }
-
-      float distance_error = distance;
-      integral_linear += distance_error;
-      integral_linear = constrain(integral_linear, integral_min, integral_max);
-      float derivative_linear = (distance_error - prev_error_linear);
-      prev_error_linear = distance_error;
-      float linear_speed = (Kp_linear * distance_error) + (Ki_linear * integral_linear) + (Kd_linear * derivative_linear);
-      linear_speed = constrain(linear_speed, min_speed, max_speed);
-
-      integral_angular += angular_error_enc;
-      integral_angular = constrain(integral_angular, integral_min, integral_max);
-      float derivative_angular = (angular_error_enc - prev_error_angular);
-      prev_error_angular = angular_error_enc;
-      float angular_correction = (Kp_angular * angular_error_enc) + (Ki_angular * integral_angular) + (Kd_angular * derivative_angular);
-
-      float left_speed = linear_speed - angular_correction;
-      float right_speed = linear_speed + angular_correction;
-
-      if (left_speed > 0) left_speed = constrain(left_speed, min_speed, max_speed);
-      else if (left_speed < 0) left_speed = constrain(left_speed, -max_speed, -min_speed);
-      if (right_speed > 0) right_speed = constrain(right_speed, min_speed, max_speed);
-      else if (right_speed < 0) right_speed = constrain(right_speed, -max_speed, -min_speed);
-
-      setMotor(right_speed, left_speed);
-      break;
-    }
-    case TURN_TO_FINAL_ANGLE:
-    {
-      float final_angle_error = normalize_angle(command_target_theta - current_theta_imu);
-      if (abs(final_angle_error) > angle_threshold) {
-        integral_rot += final_angle_error;
-        integral_rot = constrain(integral_rot, integral_min, integral_max);
-        float derivative_rot = final_angle_error - prev_error_rot;
-        prev_error_rot = final_angle_error;
-        float pid_output = (Kp_rot * final_angle_error) + (Ki_rot * integral_rot) + (Kd_rot * derivative_rot);
-        int rotation_correction = constrain((int)pid_output, -rotation_speed, rotation_speed);
-        if (rotation_correction > 0 && rotation_correction < min_speed) rotation_correction = min_speed;
-        else if (rotation_correction < 0 && rotation_correction > -min_speed) rotation_correction = -min_speed;
-        setMotor(rotation_correction, -rotation_correction);
-      } else {
-        setMotor(0, 0);
-        command_active = false;
-        nav_state = IDLE;
-        integral_rot = integral_linear = integral_angular = 0;
-        prev_error_rot = prev_error_linear = prev_error_angular = 0;
-      }
-      break;
+  // Check if reached target
+  if (remaining_distance < distance_threshold) {
+    setMotor(0, 0);
+    command_active = false;
+    nav_state = IDLE;
+    integral_linear = integral_angular = 0;
+    prev_error_linear = prev_error_angular = 0;
+    return;
   }
-  }
+
+  // PID for linear speed based on remaining distance
+  integral_linear += remaining_distance;
+  integral_linear = constrain(integral_linear, integral_min, integral_max);
+  float derivative_linear = (remaining_distance - prev_error_linear);
+  prev_error_linear = remaining_distance;
+  float linear_speed = (Kp_linear * remaining_distance) + (Ki_linear * integral_linear) + (Kd_linear * derivative_linear);
+  linear_speed = constrain(linear_speed, min_speed, max_speed) * direction;
+
+  // PID for heading correction using ENCODER theta (keep initial heading)
+  float heading_error = normalize_angle(initial_heading - current_theta_enc);
+  integral_angular += heading_error;
+  integral_angular = constrain(integral_angular, integral_min, integral_max);
+  float derivative_angular = (heading_error - prev_error_angular);
+  prev_error_angular = heading_error;
+  float angular_correction = (Kp_angular * heading_error) + (Ki_angular * integral_angular) + (Kd_angular * derivative_angular);
+
+  // Calculate individual wheel speeds
+  float left_speed = linear_speed - angular_correction;
+  float right_speed = linear_speed + angular_correction;
+
+  // Constrain speeds
+  if (left_speed > 0) left_speed = constrain(left_speed, min_speed, max_speed);
+  else if (left_speed < 0) left_speed = constrain(left_speed, -max_speed, -min_speed);
+  if (right_speed > 0) right_speed = constrain(right_speed, min_speed, max_speed);
+  else if (right_speed < 0) right_speed = constrain(right_speed, -max_speed, -min_speed);
+
+  setMotor(right_speed, left_speed);
 }
 
 void execute_rotate(float current_theta_imu) {
-  float angle_error = normalize_angle(command_target_theta - current_theta_imu);
+  float angle_error = normalize_angle(command_target_angle - current_theta_imu);
+
   if (abs(angle_error) > angle_threshold) {
     integral_rot += angle_error;
     integral_rot = constrain(integral_rot, integral_min, integral_max);
-    
+
     float derivative_rot = (angle_error - prev_error_rot);
     prev_error_rot = angle_error;
-    
+
     float pid_output = (Kp_rot * angle_error) + (Ki_rot * integral_rot) + (Kd_rot * derivative_rot);
     int rotation_correction = constrain((int)pid_output, -rotation_speed, rotation_speed);
-    
-    if (rotation_correction > 0 && rotation_correction < 95) rotation_correction = 95;
-    else if (rotation_correction < 0 && rotation_correction > -95) rotation_correction = -95;
+
+    if (rotation_correction > 0 && rotation_correction < 92) rotation_correction = 92;
+    else if (rotation_correction < 0 && rotation_correction > -92) rotation_correction = -92;
+
     setMotor(rotation_correction, -rotation_correction);
+  } else {
+    setMotor(0, 0);
+    command_active = false;
+    nav_state = IDLE;
+    integral_rot = 0;
+    prev_error_rot = 0;
+  }
+}void exec_manuver(float current_theta_imu) {
+  // Compute how much we've turned CCW from start
+  float delta = current_theta_imu - manuver_start_angle;
+  
+  // Normalize delta to [-180, 180], but we want positive CCW
+  // Since we're turning CCW, delta should increase
+  // Handle wrap-around (e.g., from 170° to -170° = +20° turn)
+  if (delta < -180) delta += 360;
+  if (delta > 180) delta -= 360;
+
+  // We want +180° turn (CCW), so error = 180 - current_delta
+  float angle_error = manuver_target_delta - delta;
+
+  if (abs(angle_error) > angle_threshold) {
+    integral_rot += angle_error;
+    integral_rot = constrain(integral_rot, integral_min, integral_max);
+
+    float derivative_rot = (angle_error - prev_error_rot);
+    prev_error_rot = angle_error;
+
+    float pid_output = (Kp_rot * angle_error) + (Ki_rot * integral_rot) + (Kd_rot * derivative_rot);
+    int left_speed = constrain((int)pid_output, min_speed, max_speed);
+
+    // RIGHT WHEEL STOPPED, LEFT WHEEL MOVES FORWARD (CCW turn)
+    setMotor(0, -left_speed);  // Right=0, Left=positive
   } else {
     setMotor(0, 0);
     command_active = false;
